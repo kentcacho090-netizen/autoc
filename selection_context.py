@@ -81,28 +81,44 @@ class SelectionContextDetector:
         if not matches:
             return None
 
-        allowed_features = {
-            "hero_upgrade": {"hero"},
-            "laboratory": {"laboratory"},
-            "builder_lab": {"laboratory"},
-            "wall_upgrade": {"wall"},
-            "builder_wall_upgrade": {"wall"},
-            "building_upgrade": {"building"},
-            "builder_upgrade": {"building"},
+        required_feature = {
+            "hero_upgrade": "hero",
+            "laboratory": "laboratory",
+            "builder_lab": "builder_laboratory",
+            "wall_upgrade": "wall",
+            "builder_wall_upgrade": "builder_wall",
+            "building_upgrade": "building",
+            "builder_upgrade": "builder_building",
         }.get(action_name)
-        if not allowed_features:
+        if required_feature is None:
             return None
 
-        compatible = [item for item in matches if item.feature in allowed_features]
+        compatible = [
+            item
+            for item in matches
+            if item.feature == required_feature
+            or (
+                required_feature in {"builder_laboratory", "builder_wall", "builder_building"}
+                and item.feature == required_feature.removeprefix("builder_")
+            )
+        ]
         if not compatible:
             return None
 
         selected = compatible[0]
+        features = {selected.feature, selected.name.replace(" ", "_")}
+        if action_name == "builder_lab":
+            features.add("builder_laboratory")
+        elif action_name == "builder_wall_upgrade":
+            features.add("builder_wall")
+        elif action_name == "builder_upgrade":
+            features.add("builder_building")
+
         return SelectionContext(
             object_type=selected.feature,
             object_name=selected.name,
             village=village,
             source=source,
             confidence=min(float(confidence), target.confidence),
-            features=frozenset({selected.feature, selected.name.replace(" ", "_")}),
+            features=frozenset(features),
         )
