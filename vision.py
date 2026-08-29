@@ -35,12 +35,7 @@ class Observation:
 
 
 class ScreenDetector:
-    """CoC resource OCR for a 1280x720 landscape screenshot.
-
-    The HUD number is near the far right of each resource bar. The detector
-    deliberately rejects OCR strings containing arbitrary letters so values
-    such as Tesseract's previous ``mm 7`` cannot become the resource value 7.
-    """
+    """CoC resource OCR for a 1280x720 landscape screenshot."""
 
     def __init__(self, controller, config_path="detector_config.json"):
         self.controller = controller
@@ -66,8 +61,6 @@ class ScreenDetector:
         if not text:
             return None
         raw = text.strip().upper().replace(" ", "")
-        # Tesseract sometimes ignores the whitelist. Reject those hallucinated
-        # letters instead of silently converting them to numbers.
         if not re.fullmatch(r"[0-9][0-9,\.]*[KMB]?", raw):
             return None
         suffix = raw[-1:] if raw[-1:] in "KMB" else ""
@@ -110,12 +103,8 @@ class ScreenDetector:
                 r, g, b = px[x, y]
                 hi = max(r, g, b)
                 lo = min(r, g, b)
-                # CoC digits are bright and substantially less saturated than
-                # the colored resource icons/background.
                 if hi >= threshold and (hi - lo) <= 55 and (r + g + b) >= 560:
                     opx[x, y] = 255
-        out = out.filter(ImageFilter.MaxFilter(3))
-        out = out.filter(ImageFilter.MedianFilter(3))
         return out
 
     def _tesseract(self, image, psm):
@@ -143,16 +132,14 @@ class ScreenDetector:
                 except OSError:
                     pass
 
-    def _resource_number(self, image, region) -> Tuple[Optional[int], str, float]:
-        crop = self._crop_norm(image, region)
-        mask = self._white_text_mask(crop)
+    def _ocr_mask(self, mask):
+        """OCR one preprocessing variant and return valid numeric candidates."""
         bbox = mask.getbbox()
         if not bbox:
-            return None, "", 0.0
-
+            return []
         bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
         if bw < 10 or bh < 6:
-            return None, "", 0.0
+            return []
 
         pad_x = max(3, int(bw * 0.08))
         pad_y = max(3, int(bh * 0.30))
@@ -170,29 +157,48 @@ class ScreenDetector:
             value = self.parse_number(raw)
             if value is not None and 0 <= value <= 2_000_000_000:
                 outputs.append((value, raw))
+        return outputs
+
+    def _resource_number(self, image, region) -> Tuple[Optional[int], str, float]:
+        crop = self._crop_norm(image, region)
+        base = self._white_text_mask(crop)
+
+        # Keep the original mask for clean rows such as gold/gems, but also
+        # try an opening pass and a median pass to remove tiny HUD artifacts.
+        masks = [
+            base,
+            base.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3)),
+            base.filter(ImageFilter.MedianFilter(5)),
+        ]
+        outputs = []
+        for mask in masks:
+            outputs.extend(self._ocr_mask(mask))
 
         if not outputs:
             return None, "", 0.0
 
         counts = {}
+        raws = {}
         for value, raw in outputs:
             counts[value] = counts.get(value, 0) + 1
+            raws.setdefault(value, []).append(raw)
+
         best_value = max(counts, key=lambda v: (counts[v], -len(str(v))))
         agreeing = counts[best_value]
-        confidence = min(0.99, 0.55 + 0.20 * agreeing)
-        raw_text = " | ".join(raw for value, raw in outputs if value == best_value)
+        confidence = min(0.99, 0.55 + 0.10 * agreeing)
+        raw_text = " | ".join(raws[best_value])
         return best_value, raw_text, confidence
 
     @staticmethod
     def _default_hud_regions():
-        # The supplied reference resource crops show the number near the far
-        # right edge of each ~260 px HUD bar. These regions are shifted right
-        # compared with the previous version, which was clipping the digits.
+        # Calibrated against the supplied 1280x720 landscape home-village
+        # screenshot. Dark elixir is absent on pre-TH7 accounts; gems use the
+        # next visible row and therefore have their own crop.
         return {
-            "gold": [0.900, 0.018, 0.075, 0.070],
-            "elixir": [0.900, 0.105, 0.075, 0.070],
-            "dark_elixir": [0.900, 0.190, 0.075, 0.070],
-            "gems": [0.900, 0.275, 0.075, 0.070],
+            "gold": [0.850, 0.015, 0.135, 0.075],
+            "elixir": [0.850, 0.105, 0.135, 0.075],
+            "dark_elixir": [0.850, 0.195, 0.135, 0.075],
+            "gems": [0.890, 0.210, 0.090, 0.075],
         }
 
     def observe(self, image_path=None):
@@ -229,12 +235,14 @@ class ScreenDetector:
                         raw_parts.append(f"{key}:{raw}")
                         confs.append(conf)
 
-                hits = sum(resources[k] is not None for k in ("gold", "elixir", "dark_elixir"))
-                village = "home" if hits >= 2 else "unknown"
+                # Gold + elixir are the stable home-village indicators.
+                # Dark elixir is legitimately unavailable before TH7.
+                core_hits = sum(resources[k] is not None for k in ("gold", "elixir"))
+                village = "home" if core_hits == 2 else "unknown"
                 confidence = sum(confs) / len(confs) if confs else 0.0
                 diagnostics = (
                     f"viewport={bounds[0]},{bounds[1]}-{bounds[2]},{bounds[3]}; "
-                    f"rotation={rotation}; resource_regions=number-only-right; "
+                    f"rotation={rotation}; resource_regions=calibrated-right; "
                     f"raw=" + " || ".join(raw_parts)
                 )
                 return Observation(
