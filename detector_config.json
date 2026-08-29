@@ -1,16 +1,16 @@
 {
   "regions": {
-    "gold": [0.84, 0.025, 0.155, 0.070],
-    "elixir": [0.84, 0.095, 0.155, 0.070],
-    "dark_elixir": [0.84, 0.165, 0.155, 0.070],
-    "gems": [0.84, 0.235, 0.155, 0.070],
-    "builders": [0.43, 0.025, 0.22, 0.075]
+    "gold": [0.835, 0.018, 0.090, 0.070],
+    "elixir": [0.835, 0.105, 0.090, 0.070],
+    "dark_elixir": [0.835, 0.190, 0.090, 0.070],
+    "gems": [0.835, 0.275, 0.090, 0.070]
   },
-  "confidence_threshold": 0.70,
+  "confidence_threshold": 0.80,
   "max_stale_seconds": 30,
   "ocr": {
     "scale": 4,
     "psm": 7,
-    "threshold": 145
+    "threshold": 165,
+    "number_only": true
   }
 }
