@@ -6,6 +6,7 @@ from engine import ADBController
 from strategy import AccountState, SmartPlanner
 from automation_state import SmartAutomationStateMachine, Target
 from diagnostics import DiagnosticStore
+from diagnostic_report import DiagnosticReporter
 from progress import ProgressReporter
 from ui_targets import UITargetDetector
 from vision import ScreenDetector
@@ -24,6 +25,7 @@ class BotService:
         self.last_phase = "observe"
         self.progress = ProgressReporter(interval_seconds=60.0)
         self.diagnostics = DiagnosticStore()
+        self.reporter = DiagnosticReporter()
         self.reload()
 
     def reload(self):
@@ -57,6 +59,8 @@ class BotService:
         resources = observation.resources
         return AccountState(
             village=observation.village,
+            town_hall=getattr(observation, "town_hall", None),
+            builder_base_unlocked=getattr(observation, "builder_base_unlocked", False),
             gold=resources.get("gold"),
             elixir=resources.get("elixir"),
             dark_elixir=resources.get("dark_elixir"),
@@ -83,8 +87,17 @@ class BotService:
             observation=self.last_observation,
             decision=self.last_decision,
             progress=self.progress.snapshot.as_dict(),
+            targets=self.last_targets,
+            phase=self.last_phase,
             error=error,
         )
+
+    def _write_report(self):
+        try:
+            return self.reporter.write()
+        except OSError as exc:
+            print(f"[Diagnostics] Report write failed: {exc}")
+            return None
 
     def run(self):
         controller = ADBController()
@@ -105,6 +118,7 @@ class BotService:
                     self.last_phase = "recover"
                     self.progress.error("Android control unavailable")
                     self._write_diagnostics("Android control unavailable")
+                    self._write_report()
                     self.progress.maybe_report()
                     time.sleep(5)
                     continue
@@ -114,6 +128,7 @@ class BotService:
                     self.last_phase = "recover"
                     self.progress.error("Screenshot capture failed")
                     self._write_diagnostics("Screenshot capture failed")
+                    self._write_report()
                     self.progress.maybe_report()
                     time.sleep(3)
                     continue
@@ -175,6 +190,7 @@ class BotService:
 
                 self.progress.maybe_report()
                 self._write_diagnostics()
+                self._write_report()
                 delay = max(1, int(self.settings.get("timing", {}).get("cycle_delay", 10)))
                 time.sleep(delay)
             except Exception as exc:
@@ -182,9 +198,11 @@ class BotService:
                 self.last_phase = self.machine.state.phase.value
                 self.progress.error(str(exc))
                 self._write_diagnostics(str(exc))
+                self._write_report()
                 self.progress.maybe_report()
                 print(f"[Bot] Recovered from cycle error: {exc}")
                 time.sleep(2)
 
         self.progress.maybe_report(force=True)
         self._write_diagnostics()
+        self._write_report()
