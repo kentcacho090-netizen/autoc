@@ -1,6 +1,6 @@
 """Verified UI-target detection for AutoC.
 
-Targets are discovered from the current screenshot.  AutoC never taps a
+Targets are discovered from the current screenshot. AutoC never taps a
 hard-coded coordinate through this module: a target must be visible in the
 fresh screenshot and its OCR bounding box must satisfy the confidence/size
 checks.
@@ -47,8 +47,15 @@ class UITargetDetector:
     def __init__(self, confidence_threshold: float = 0.55):
         self.confidence_threshold = confidence_threshold
 
-    @staticmethod
-    def _ocr_data(image_path: str):
+    def _ocr_data(self, image_path: str):
+        """Return OCR word boxes from an image.
+
+        This is intentionally an instance method because the OCR filtering
+        uses this detector's confidence threshold. The previous implementation
+        accidentally declared it static while referencing ``self``, which
+        caused the ``NameError: name 'self' is not defined`` crash seen in the
+        target-scan test.
+        """
         if Image is None or not shutil.which("tesseract"):
             return []
         temp = None
@@ -58,12 +65,17 @@ class UITargetDetector:
                 fd, temp = tempfile.mkstemp(suffix=".png")
                 os.close(fd)
                 im.save(temp, format="PNG")
+
             p = subprocess.run(
                 ["tesseract", temp, "stdout", "--psm", "11", "tsv"],
-                capture_output=True, text=True, timeout=10, check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
             )
             if p.returncode != 0:
                 return []
+
             rows = []
             for line in p.stdout.splitlines()[1:]:
                 cols = line.split("\t")
@@ -100,7 +112,17 @@ class UITargetDetector:
             normalized = self._norm(text)
             for name, variants in aliases.items():
                 if any(v in normalized for v in variants):
-                    targets.append(UITarget(name, text, x + w // 2, y + h // 2, w, h, conf))
+                    targets.append(
+                        UITarget(
+                            name,
+                            text,
+                            x + w // 2,
+                            y + h // 2,
+                            w,
+                            h,
+                            conf,
+                        )
+                    )
         return targets
 
     def best(self, image_path: str, name: str) -> Optional[UITarget]:
