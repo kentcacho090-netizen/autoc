@@ -100,8 +100,8 @@ def settings_menu():
 
 
 def sub_toggle(items, section):
+    s = load_settings()
     while True:
-        s = load_settings()
         banner()
         print(f"--- {section.replace('_', ' ').title()} ---")
         for i, (key, label) in enumerate(items, 1):
@@ -121,12 +121,18 @@ def run_test():
     settings = load_settings()
     controller = AndroidController()
     print("Android control:", "READY" if controller.check_connection() else "FAILED")
-    package = settings.get("target_app", "")
-    if package:
-        print(f"Target app     : {package}")
-        print("Launching target app before capture...")
-        controller.launch(package)
-        time.sleep(3)
+    package = settings.get("target_app", "com.supercell.clashofclans")
+    print("Target app    :", package)
+    if not controller.package_installed(package):
+        print("Target app    : NOT INSTALLED")
+        input("\nPress Enter...")
+        return
+    print("Launching target app...")
+    if not controller.launch(package, wait=6):
+        print("Launch result : FAILED")
+        print("Tip: verify the game is installed and can be opened normally.")
+        input("\nPress Enter...")
+        return
     path = controller.take_screenshot("autoc_test.png")
     if not path:
         print("Screenshot: FAILED")
