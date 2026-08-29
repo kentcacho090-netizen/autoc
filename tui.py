@@ -10,6 +10,8 @@ from bot_service import BotService
 from engine import AndroidController
 from townhall import TownHallProbe
 from vision import ScreenDetector
+from ui_targets import UITargetDetector
+from verified_actions import VerifiedActions
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(BASE, "settings.json")
@@ -131,7 +133,6 @@ def run_test():
     print("Launching target app...")
     if not controller.launch(package, wait=6):
         print("Launch result : FAILED")
-        print("Tip: verify the game is installed and can be opened normally.")
         input("\nPress Enter...")
         return
     path = controller.take_screenshot("autoc_test.png")
@@ -155,25 +156,81 @@ def run_test():
     input("\nPress Enter...")
 
 
-def run_townhall_test():
-    banner("TOWN HALL TEST")
+def run_target_scan():
+    banner("SMART TARGET SCAN")
     settings = load_settings()
     controller = AndroidController()
-    print("Android control:", "READY" if controller.check_connection() else "FAILED")
     package = settings.get("target_app", "com.supercell.clashofclans")
     if not controller.package_installed(package):
         print("Target app    : NOT INSTALLED")
         input("\nPress Enter...")
         return
-
-    print("Launching target app...")
     if not controller.launch(package, wait=4):
         print("Launch result : FAILED")
         input("\nPress Enter...")
         return
+    image = controller.take_screenshot("autoc_targets.png")
+    if not image:
+        print("Screenshot    : FAILED")
+        input("\nPress Enter...")
+        return
+    detector = UITargetDetector()
+    targets = detector.find(image)
+    print("Screenshot    : OK")
+    print("Image         :", image)
+    if not targets:
+        print("Targets       : none confidently detected")
+    else:
+        for target in targets:
+            print(f"Target        : {target.name:<14} text={target.text!r:<18} center=({target.x},{target.y}) confidence={target.confidence:.0%}")
+    input("\nPress Enter...")
 
-    print("Town Hall probe: tapping the configured Town Hall point...")
-    print("The panel will be read and closed automatically.")
+
+def run_verified_action_test():
+    banner("VERIFIED ACTION TEST")
+    settings = load_settings()
+    controller = AndroidController()
+    package = settings.get("target_app", "com.supercell.clashofclans")
+    if not controller.package_installed(package):
+        print("Target app    : NOT INSTALLED")
+        input("\nPress Enter...")
+        return
+    if not controller.launch(package, wait=4):
+        print("Launch result : FAILED")
+        input("\nPress Enter...")
+        return
+    name = input("Verified target [town_hall/upgrade/collect/attack] : ").strip().lower()
+    if name not in {"town_hall", "upgrade", "collect", "attack"}:
+        print("Unknown target. No action was taken.")
+        input("\nPress Enter...")
+        return
+    try:
+        result = VerifiedActions(controller).tap_named(name)
+        print("Result        :", "SUCCESS" if result.ok else "REFUSED")
+        print("Reason        :", result.reason)
+        if result.target:
+            print(f"Verified UI   : {result.target.text!r} at ({result.target.x},{result.target.y}) confidence={result.target.confidence:.0%}")
+        print("Before image  :", result.before or "(none)")
+        print("After image   :", result.after or "(none)")
+    except Exception as exc:
+        print("Action test error:", exc)
+    input("\nPress Enter...")
+
+
+def run_townhall_test():
+    banner("TOWN HALL TEST")
+    settings = load_settings()
+    controller = AndroidController()
+    package = settings.get("target_app", "com.supercell.clashofclans")
+    if not controller.package_installed(package):
+        print("Target app    : NOT INSTALLED")
+        input("\nPress Enter...")
+        return
+    if not controller.launch(package, wait=4):
+        print("Launch result : FAILED")
+        input("\nPress Enter...")
+        return
+    print("Town Hall probe uses the current detector; no blind tap is performed here.")
     try:
         result = TownHallProbe(controller, CONFIG_FILE).probe("autoc_townhall.png")
         print("Tap point    :", result.tap)
@@ -182,8 +239,6 @@ def run_townhall_test():
         print("OCR text     :", result.raw_text[:900] or "(none)")
         print("Diagnostics  :", result.diagnostics)
         print("Panel image  :", result.screenshot or "(none)")
-        if result.level is None:
-            print("Tip: if the tap missed the Town Hall, we will calibrate the x/y point from the next screenshot.")
     except Exception as exc:
         print("Town Hall test error:", exc)
     input("\nPress Enter...")
@@ -197,25 +252,28 @@ def main():
         print("[2] Smart Automation Settings")
         print("[3] Test Android + Screenshot + OCR")
         print("[4] Test Town Hall detection")
-        print("[5] Reload Settings")
+        print("[5] Smart UI target scan")
+        print("[6] Verified action test")
+        print("[7] Reload Settings")
         print("[Q] Exit")
         choice = input("\nChoose : ").strip().lower()
         if choice == "1":
             bot.toggle()
             time.sleep(1)
         elif choice == "2":
-            settings_menu()
-            bot.reload()
+            settings_menu(); bot.reload()
         elif choice == "3":
             run_test()
         elif choice == "4":
             run_townhall_test()
         elif choice == "5":
+            run_target_scan()
+        elif choice == "6":
+            run_verified_action_test()
+        elif choice == "7":
             bot.reload()
         elif choice == "q":
-            bot.stop()
-            print("AutoC closed.")
-            return
+            bot.stop(); print("AutoC closed."); return
 
 
 if __name__ == "__main__":
