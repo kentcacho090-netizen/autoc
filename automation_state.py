@@ -1,9 +1,4 @@
-"""State machine for AutoC's smart automation loop.
-
-The state machine separates perception, decision making, action execution and
-verification. It refuses to invent a tap when the vision layer has not supplied
-a verified target for the exact requested action.
-"""
+"""Safety state machine for AutoC's observe-plan-act-verify loop."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -46,49 +41,49 @@ class CycleState:
     last_error: Optional[str] = None
 
 
-class SmartAutomationStateMachine:
-    """Deterministic controller around the existing planner.
+ACTION_TARGETS = {
+    "hero_upgrade": ("hero_upgrade", "upgrade"),
+    "laboratory": ("laboratory", "upgrade"),
+    "building_upgrade": ("building_upgrade", "upgrade"),
+    "wall_upgrade": ("wall_upgrade", "upgrade"),
+    "builder_lab": ("builder_lab", "upgrade"),
+    "builder_upgrade": ("builder_upgrade", "upgrade"),
+    "builder_wall_upgrade": ("builder_wall_upgrade", "upgrade"),
+}
 
-    A decision becomes executable only when a target with the exact action name
-    is present and passes the confidence threshold.  Related UI labels are not
-    interchangeable because doing so can turn an otherwise valid button into a
-    wrong tap on a different game object.
-    """
+
+class SmartAutomationStateMachine:
+    """Convert planner categories into safe, dynamically detected actions."""
 
     def __init__(self, min_target_confidence: float = 0.80, max_failures: int = 3):
-        self.min_target_confidence = min_target_confidence
+        self.min_target_confidence = float(min_target_confidence)
         self.max_failures = max(1, int(max_failures))
         self.state = CycleState()
 
-    def reset(self):
+    def reset(self) -> None:
         self.state = CycleState()
 
     def plan_action(self, decision: Any, targets: Dict[str, Target]) -> Action:
-        action_name = getattr(decision, "action", "observe")
-        reason = getattr(decision, "reason", "")
+        action_name = str(getattr(decision, "action", "observe"))
+        reason = str(getattr(decision, "reason", ""))
         safe = bool(getattr(decision, "safe", False))
 
         if action_name in {"observe", "farm", "builder_farm"}:
             return Action(action_name, reason=reason, safe=False)
 
-        target = targets.get(action_name)
-        if target is None:
-            return Action(
-                "observe",
-                reason=f"No verified target for exact action {action_name}",
-                safe=False,
-            )
+        aliases = ACTION_TARGETS.get(action_name, (action_name,))
+        candidates = [targets[name] for name in aliases if name in targets]
+        target = max(candidates, key=lambda item: item.confidence, default=None)
 
+        if target is None:
+            return Action("observe", reason=f"No verified target for {action_name}", safe=False)
         if target.confidence < self.min_target_confidence:
             return Action(
                 "observe",
-                reason=(
-                    f"Target confidence {target.confidence:.2f} is below "
-                    f"{self.min_target_confidence:.2f}"
-                ),
+                reason=(f"Target confidence {target.confidence:.2f} is below "
+                        f"{self.min_target_confidence:.2f}"),
                 safe=False,
             )
-
         if not safe:
             return Action("observe", reason=f"Planner did not approve {action_name}", safe=False)
 
@@ -102,19 +97,19 @@ class SmartAutomationStateMachine:
         self.state.last_action = action.name
         return True
 
-    def after_action(self, verified: bool, error: Optional[str] = None):
+    def after_action(self, verified: bool, error: Optional[str] = None) -> None:
         if verified:
             self.state.phase = Phase.VERIFY
             self.state.consecutive_failures = 0
             self.state.last_error = None
-        else:
-            self.state.consecutive_failures += 1
-            self.state.last_error = error or "Action was not verified"
-            self.state.phase = (
-                Phase.PAUSED
-                if self.state.consecutive_failures >= self.max_failures
-                else Phase.RECOVER
-            )
+            return
+        self.state.consecutive_failures += 1
+        self.state.last_error = error or "Action was not verified"
+        self.state.phase = (
+            Phase.PAUSED
+            if self.state.consecutive_failures >= self.max_failures
+            else Phase.RECOVER
+        )
 
     @property
     def paused(self) -> bool:
