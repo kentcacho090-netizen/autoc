@@ -92,24 +92,46 @@ class AndroidController:
         if active or running:
             return True
         if result is not None:
-            # On this cloud phone, floating Termux can remain the reported focus even
-            # after the game is launched. Do not turn that UI quirk into a false failure.
             print("[Android] Launch command accepted; foreground is obscured/unreliable.")
             return True
         print(f"[Android] Could not launch target: {package}")
         return False
 
     def take_screenshot(self, filename="screen.png"):
-        """Save a screenshot in the current Termux directory."""
+        """Capture Android's display and copy it into Termux without root writing to the app sandbox."""
         target = os.path.abspath(filename)
         remote = "/sdcard/autoc_screen.png"
-        if self.run(f"screencap -p {remote}") is not None:
-            if self.use_root:
-                self.run(f"cp {remote} {target}")
-            else:
-                self.run(f"cat {remote} > {target}")
-            print(f"[System] Screenshot saved as {target}")
-            return target
+
+        # Capture to shared storage from Android. Then let the Termux Python process
+        # create/write the destination file itself; this avoids SELinux/app-sandbox
+        # failures caused by `su -c cp ... /data/data/com.termux/...`.
+        capture = self.run(f"screencap -p {remote}")
+        if capture is None:
+            print("[System] Screenshot capture failed")
+            return None
+
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        copy_commands = []
+        if self.use_root:
+            copy_commands.append(["su", "-c", f"cat {remote}"])
+        copy_commands.append(["sh", "-c", f"cat {remote}"])
+
+        for args in copy_commands:
+            try:
+                with open(target, "wb") as output:
+                    result = subprocess.run(args, stdout=output, stderr=subprocess.PIPE, check=True)
+                if os.path.getsize(target) > 0:
+                    print(f"[System] Screenshot saved as {target}")
+                    return target
+            except (OSError, subprocess.CalledProcessError) as exc:
+                print(f"[System] Screenshot copy attempt failed: {exc}")
+                try:
+                    if os.path.exists(target):
+                        os.remove(target)
+                except OSError:
+                    pass
+
+        print("[System] Screenshot copy failed")
         return None
 
     def check_connection(self):
