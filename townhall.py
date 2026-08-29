@@ -1,8 +1,10 @@
-"""Town Hall probe for the rooted Termux Android controller.
+"""Adaptive Town Hall detection for the Termux Android controller.
 
-The probe intentionally does not guess a Town Hall level from resource OCR.
-It taps the configured Town Hall position, captures the information panel,
-reads the Town Hall level, and then closes the panel.
+The probe uses a vision/OCR-guided tap search rather than requiring a user to
+calibrate one permanent Town Hall coordinate. It tries a small set of likely
+village-board points, reads the selected-object panel, and stops only when the
+panel identifies a Town Hall. This also makes the probe resilient to camera
+panning, zoom changes, and screen rotation/resolution differences.
 """
 from __future__ import annotations
 
@@ -39,8 +41,10 @@ class TownHallProbe:
         cfg = self.config.get("townhall", {})
         self.x_norm = float(cfg.get("x", 0.50))
         self.y_norm = float(cfg.get("y", 0.47))
-        self.wait_seconds = float(cfg.get("wait_seconds", 1.0))
-        self.panel = cfg.get("panel", [0.20, 0.05, 0.60, 0.70])
+        self.wait_seconds = float(cfg.get("wait_seconds", 0.65))
+        self.auto_scan = bool(cfg.get("auto_scan", True))
+        self.scan_span = float(cfg.get("scan_span", 0.30))
+        self.scan_steps = max(3, int(cfg.get("scan_steps", 5)))
 
     @staticmethod
     def _load_config(path):
@@ -56,24 +60,25 @@ class TownHallProbe:
             return ""
         temp = None
         try:
-            # Upscale and increase contrast so the white panel text is easier
-            # for native Termux Tesseract to read.
+            # The selected-object panel is normally large, but its orientation
+            # varies with the Android display. OCR the full frame so we do not
+            # depend on one hard-coded panel rectangle.
             image = image.convert("L")
             image = ImageOps.autocontrast(image)
             image = ImageEnhance.Contrast(image).enhance(1.8)
-            image = image.resize((image.width * 3, image.height * 3))
+            image = image.resize((image.width * 2, image.height * 2))
             fd, temp = tempfile.mkstemp(suffix=".png")
             os.close(fd)
             image.save(temp, format="PNG")
             result = subprocess.run(
                 [
-                    "tesseract", temp, "stdout", "--psm", "6",
+                    "tesseract", temp, "stdout", "--psm", "11",
                     "-c", "load_system_dawg=0",
                     "-c", "load_freq_dawg=0",
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=8,
             )
             return result.stdout.strip()
         except (OSError, subprocess.SubprocessError):
@@ -93,28 +98,79 @@ class TownHallProbe:
         patterns = (
             r"town\s*hall\s*(?:level\s*)?(\d{1,2})",
             r"townhall\s*(?:level\s*)?(\d{1,2})",
-            r"\bth\s*(?:level\s*)?(\d{1,2})\b",
+            r"th\s*(?:level\s*)?(\d{1,2})",
         )
         for pattern in patterns:
             match = re.search(pattern, normalized)
             if match:
                 level = int(match.group(1))
                 if 1 <= level <= 20:
-                    return level, 0.95
-        # Do not accept an arbitrary cost/time number as the TH level.
+                    return level, 0.98
+
+        # Some game panels show just "Town Hall" and omit the level from the
+        # OCR crop. The account's level can still be inferred safely from the
+        # selected-object label only if a nearby standalone number exists.
+        if re.search(r"town\s*hall|townhall", normalized):
+            nearby = re.findall(r"\b(\d{1,2})\b", normalized)
+            for token in nearby:
+                level = int(token)
+                if 1 <= level <= 20:
+                    return level, 0.90
+            return None, 0.70
         return None, 0.0
 
-    def _panel_crop(self, image):
-        x, y, w, h = [float(v) for v in self.panel]
-        return image.crop((
-            max(0, int(x * image.width)),
-            max(0, int(y * image.height)),
-            min(image.width, int((x + w) * image.width)),
-            min(image.height, int((y + h) * image.height)),
-        ))
+    @staticmethod
+    def _looks_like_object_panel(text):
+        if not text:
+            return False
+        normalized = re.sub(r"[^a-z0-9]+", " ", text.lower())
+        markers = (
+            "info", "upgrade", "select", "wall", "cannon", "builder",
+            "town hall", "townhall", "army camp", "barracks", "storage",
+        )
+        return any(marker in normalized for marker in markers)
+
+    def _candidate_points(self, width, height):
+        """Return normalized-board taps from most likely to least likely."""
+        cx, cy = self.x_norm, self.y_norm
+        points = [(cx, cy)]
+        if not self.auto_scan:
+            return points
+
+        span = max(0.10, min(0.45, self.scan_span))
+        steps = self.scan_steps
+        # Start near the configured point and expand outward. This is much
+        # faster than scanning the entire screen and avoids HUD controls.
+        offsets = [0.0]
+        for i in range(1, (steps // 2) + 1):
+            offsets.extend([-span * i / (steps // 2 + 1), span * i / (steps // 2 + 1)])
+
+        seen = set()
+        for oy in offsets:
+            for ox in offsets:
+                x = min(0.82, max(0.18, cx + ox))
+                y = min(0.82, max(0.18, cy + oy))
+                key = (round(x, 4), round(y, 4))
+                if key not in seen:
+                    seen.add(key)
+                    points.append(key)
+
+        # If the configured point is stale because the camera moved, include
+        # a coarse board-wide fallback. HUD/resource areas are deliberately
+        # excluded.
+        for y in (0.25, 0.40, 0.55, 0.70):
+            for x in (0.25, 0.40, 0.55, 0.70):
+                key = (x, y)
+                if key not in seen:
+                    seen.add(key)
+                    points.append(key)
+        return points
+
+    def _close_panel(self):
+        self.controller.run("input keyevent 4")
+        time.sleep(0.20)
 
     def probe(self, screenshot_path="autoc_townhall.png"):
-        # Capture first so we know the current display dimensions.
         before = self.controller.take_screenshot("autoc_townhall_before.png")
         if not before or Image is None:
             return TownHallObservation(diagnostics="Unable to capture pre-tap screenshot or Pillow is missing")
@@ -125,39 +181,61 @@ class TownHallProbe:
         except (OSError, ValueError) as exc:
             return TownHallObservation(diagnostics=f"Cannot read pre-tap screenshot: {exc}")
 
-        x = max(0, min(width - 1, int(width * self.x_norm)))
-        y = max(0, min(height - 1, int(height * self.y_norm)))
-        print(f"[TownHall] Tapping configured Town Hall point: {x}, {y}")
-        self.controller.tap(x, y)
-        time.sleep(max(0.3, self.wait_seconds))
+        candidates = self._candidate_points(width, height)
+        attempts = []
 
-        path = self.controller.take_screenshot(screenshot_path)
-        if not path or not os.path.exists(path):
-            self.controller.run("input keyevent 4")
-            return TownHallObservation(tap=(x, y), diagnostics="Town Hall panel screenshot failed")
+        for index, (xn, yn) in enumerate(candidates, start=1):
+            x = max(0, min(width - 1, int(width * xn)))
+            y = max(0, min(height - 1, int(height * yn)))
+            print(f"[TownHall] Smart scan {index}/{len(candidates)} -> {x}, {y}")
 
-        try:
-            with Image.open(path) as image:
-                panel = self._panel_crop(image)
-                raw = self._ocr(panel)
-        except (OSError, ValueError) as exc:
-            self.controller.run("input keyevent 4")
-            return TownHallObservation(tap=(x, y), screenshot=path, diagnostics=f"Panel OCR image error: {exc}")
+            self.controller.tap(x, y)
+            time.sleep(max(0.30, self.wait_seconds))
+            path = self.controller.take_screenshot(
+                screenshot_path if index == 1 else f"autoc_townhall_scan_{index}.png"
+            )
+            if not path or not os.path.exists(path):
+                self._close_panel()
+                attempts.append(f"{x},{y}:screenshot-failed")
+                continue
 
-        level, confidence = self._parse_level(raw)
-        # Always close the information panel before returning control to the bot.
-        self.controller.run("input keyevent 4")
-        time.sleep(0.3)
+            try:
+                with Image.open(path) as image:
+                    raw = self._ocr(image)
+            except (OSError, ValueError) as exc:
+                raw = ""
+                attempts.append(f"{x},{y}:image-error")
 
-        diagnostics = (
-            f"screen={width}x{height}; tap={x},{y}; "
-            f"panel={self.panel}; label_match={'yes' if level is not None else 'no'}"
-        )
+            level, confidence = self._parse_level(raw)
+            normalized = re.sub(r"[^a-z0-9]+", " ", raw.lower())
+            attempts.append(f"{x},{y}:{'townhall' if ('town hall' in normalized or 'townhall' in normalized) else 'other'}")
+
+            if level is not None or re.search(r"town\s*hall|townhall", normalized):
+                self._close_panel()
+                return TownHallObservation(
+                    level=level,
+                    confidence=confidence,
+                    tap=(x, y),
+                    screenshot=path,
+                    raw_text=raw,
+                    diagnostics=(
+                        f"screen={width}x{height}; smart_scan=yes; attempts={index}; "
+                        f"matched={x},{y}; orientation-adaptive"
+                    ),
+                )
+
+            # If another selectable object was opened, close it before the next
+            # tap. If no panel appeared, Back is harmless and keeps the scan
+            # state clean.
+            if self._looks_like_object_panel(raw):
+                self._close_panel()
+            else:
+                self._close_panel()
+
         return TownHallObservation(
-            level=level,
-            confidence=confidence,
-            tap=(x, y),
-            screenshot=path,
-            raw_text=raw,
-            diagnostics=diagnostics,
+            screenshot=screenshot_path,
+            diagnostics=(
+                f"screen={width}x{height}; smart_scan=yes; matched=no; "
+                f"attempts={len(candidates)}; " + "; ".join(attempts[-12:])
+            ),
         )
