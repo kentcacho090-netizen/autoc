@@ -9,11 +9,12 @@ from diagnostics import DiagnosticStore
 from diagnostic_report import DiagnosticReporter
 from progress import ProgressReporter
 from ui_targets import UITargetDetector
+from verified_actions import VerifiedActions
 from vision import ScreenDetector
 
 
 class BotService:
-    """Long-running smart loop with dynamic perception and safe action gating."""
+    """Long-running smart loop with dynamic perception and verified actions."""
 
     def __init__(self, settings_file):
         self.settings_file = settings_file
@@ -29,14 +30,20 @@ class BotService:
         self.reload()
 
     def reload(self):
-        with open(self.settings_file, "r", encoding="utf-8") as f:
-            self.settings = json.load(f)
+        with open(self.settings_file, "r", encoding="utf-8") as handle:
+            self.settings = json.load(handle)
         vision_settings = self.settings.get("vision", {})
         threshold = float(vision_settings.get("confidence_threshold", 0.70))
-        progress_interval = max(1.0, float(vision_settings.get("progress_interval_seconds", 60)))
+        progress_interval = max(
+            1.0,
+            float(vision_settings.get("progress_interval_seconds", 60)),
+        )
         self.planner = SmartPlanner(self.settings.get("strategy", "balanced"), threshold)
         self.machine = SmartAutomationStateMachine(
-            min_target_confidence=max(0.80, float(vision_settings.get("target_confidence_threshold", threshold))),
+            min_target_confidence=max(
+                0.80,
+                float(vision_settings.get("target_confidence_threshold", threshold)),
+            ),
             max_failures=int(vision_settings.get("max_action_failures", 3)),
         )
         self.progress_interval = progress_interval
@@ -110,6 +117,7 @@ class BotService:
                 self.settings.get("vision", {}).get("target_confidence_threshold", 0.80)
             )
         )
+        verified_actions = VerifiedActions(controller, ui_detector)
 
         while self.running:
             self.progress.cycle_started("observe")
@@ -174,17 +182,13 @@ class BotService:
                 if action.target is None:
                     self.progress.action_refused(action.reason or "No verified target")
                 elif self.machine.before_action(action):
-                    result = controller.tap(*action.target.center)
-                    verified = result is not None
-                    self.machine.after_action(
-                        verified,
-                        None if verified else "Android tap failed",
-                    )
+                    result = verified_actions.tap_named(action.name)
+                    self.machine.after_action(result.ok, None if result.ok else result.reason)
                     self.last_phase = self.machine.state.phase.value
-                    if verified:
+                    if result.ok:
                         self.progress.action_succeeded(action.name)
                     else:
-                        self.progress.error("Android tap failed")
+                        self.progress.error(result.reason or "Verified action failed")
                 else:
                     self.progress.action_refused(action.reason or "Action gate refused target")
 
