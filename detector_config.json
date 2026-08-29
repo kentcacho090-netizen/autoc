@@ -1,0 +1,18 @@
+{
+  "screen": {
+    "width": 1280,
+    "height": 720,
+    "orientation": "landscape"
+  },
+  "ocr": {
+    "scale": 4,
+    "threshold": 170,
+    "timeout": 4
+  },
+  "regions": {
+    "gold": [0.835, 0.015, 0.155, 0.075],
+    "elixir": [0.835, 0.095, 0.155, 0.075],
+    "dark_elixir": [0.835, 0.175, 0.155, 0.075],
+    "gems": [0.835, 0.245, 0.155, 0.075]
+  }
+}
