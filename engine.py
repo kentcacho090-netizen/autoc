@@ -1,6 +1,5 @@
 """Android control layer for a rooted cloud-phone Termux environment."""
 import os
-import re
 import shutil
 import subprocess
 import time
@@ -32,34 +31,32 @@ class AndroidController:
         result = self.run(f"pm path {package}")
         return bool(result and result.startswith("package:"))
 
-    @staticmethod
-    def _extract_package(text):
-        if not text:
-            return None
-        # Handles package/.Activity and package/com.example.Activity forms.
-        match = re.search(r"([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)/", text)
-        return match.group(1) if match else None
-
     def foreground_package(self):
-        """Return the best foreground/resumed package on Android variants.
+        """Return the resumed/focused Android package.
 
-        Some cloud-phone builds keep a floating Termux window focused while the
-        game remains the resumed activity. Prefer mResumedActivity/mFocusedApp,
-        then fall back to window focus.
+        Some cloud-phone environments report Termux as mCurrentFocus when
+        Termux is displayed as a floating window, while mResumedActivity still
+        correctly identifies the actual game activity.
         """
-        commands = [
+        commands = (
             "dumpsys activity activities | grep -E 'mResumedActivity|mFocusedActivity' | tail -n 3",
-            "dumpsys window windows | grep -E 'mFocusedApp|mCurrentFocus' | tail -n 3",
-        ]
+            "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' | tail -n 3",
+        )
         for command in commands:
             result = self.run(command)
-            package = self._extract_package(result)
-            if package:
-                return package
+            if not result:
+                continue
+            # Prefer a known package-looking token containing an Android activity.
+            for line in result.splitlines():
+                for token in line.replace("{", " ").replace("}", " ").split():
+                    if "/" in token and token.count("/") >= 1:
+                        candidate = token.split("/")[0].strip()
+                        if "." in candidate and not candidate.startswith(("m", "u0_")):
+                            return candidate
         return None
 
     def launch(self, package, wait=5):
-        """Launch a package and verify its resumed/foreground package."""
+        """Launch a package and report whether it becomes the resumed app."""
         if not self.package_installed(package):
             print(f"[Android] Package not installed: {package}")
             return False
@@ -72,9 +69,9 @@ class AndroidController:
         time.sleep(max(1, int(wait)))
         current = self.foreground_package()
         ok = current == package
-        print(f"[Android] Foreground/resumed package: {current or 'unknown'}")
+        print(f"[Android] Resumed/foreground package: {current or 'unknown'}")
         if not ok:
-            print(f"[Android] Target did not become foreground/resumed: {package}")
+            print(f"[Android] Target did not become active: {package}")
         return ok
 
     def take_screenshot(self, filename="screen.png"):
