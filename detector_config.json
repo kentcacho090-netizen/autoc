@@ -1,5 +1,11 @@
 {
-  "regions": {},
+  "regions": {
+    "gold": [0.82, 0.00, 0.18, 0.075],
+    "elixir": [0.82, 0.072, 0.18, 0.075],
+    "dark_elixir": [0.82, 0.144, 0.18, 0.075],
+    "gems": [0.84, 0.216, 0.16, 0.075],
+    "builders": [0.42, 0.00, 0.22, 0.10]
+  },
   "confidence_threshold": 0.70,
   "max_stale_seconds": 30,
   "ocr": {
