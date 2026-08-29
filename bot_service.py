@@ -5,6 +5,7 @@ import time
 from engine import ADBController
 from strategy import AccountState, SmartPlanner
 from automation_state import SmartAutomationStateMachine, Target
+from diagnostics import DiagnosticStore
 from progress import ProgressReporter
 from ui_targets import UITargetDetector
 from vision import ScreenDetector
@@ -22,6 +23,7 @@ class BotService:
         self.last_targets = []
         self.last_phase = "observe"
         self.progress = ProgressReporter(interval_seconds=60.0)
+        self.diagnostics = DiagnosticStore()
         self.reload()
 
     def reload(self):
@@ -63,7 +65,6 @@ class BotService:
 
     @staticmethod
     def _target_map(detected_targets):
-        """Convert dynamic UI detections into state-machine targets."""
         result = {}
         for detected in detected_targets:
             target = Target(
@@ -76,6 +77,14 @@ class BotService:
             if previous is None or target.confidence > previous.confidence:
                 result[detected.name] = target
         return result
+
+    def _write_diagnostics(self, error=None):
+        return self.diagnostics.write(
+            observation=self.last_observation,
+            decision=self.last_decision,
+            progress=self.progress.snapshot.as_dict(),
+            error=error,
+        )
 
     def run(self):
         controller = ADBController()
@@ -95,6 +104,7 @@ class BotService:
                 if not controller.check_connection():
                     self.last_phase = "recover"
                     self.progress.error("Android control unavailable")
+                    self._write_diagnostics("Android control unavailable")
                     self.progress.maybe_report()
                     time.sleep(5)
                     continue
@@ -103,6 +113,7 @@ class BotService:
                 if not image_path:
                     self.last_phase = "recover"
                     self.progress.error("Screenshot capture failed")
+                    self._write_diagnostics("Screenshot capture failed")
                     self.progress.maybe_report()
                     time.sleep(3)
                     continue
@@ -163,14 +174,17 @@ class BotService:
                     self.progress.action_refused(action.reason or "Action gate refused target")
 
                 self.progress.maybe_report()
+                self._write_diagnostics()
                 delay = max(1, int(self.settings.get("timing", {}).get("cycle_delay", 10)))
                 time.sleep(delay)
             except Exception as exc:
                 self.machine.after_action(False, str(exc))
                 self.last_phase = self.machine.state.phase.value
                 self.progress.error(str(exc))
+                self._write_diagnostics(str(exc))
                 self.progress.maybe_report()
                 print(f"[Bot] Recovered from cycle error: {exc}")
                 time.sleep(2)
 
         self.progress.maybe_report(force=True)
+        self._write_diagnostics()
