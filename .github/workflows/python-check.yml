@@ -49,3 +49,6 @@ import ui_targets
 import verified_actions
 print('Application imports valid')
 PY
+
+      - name: Run deterministic core tests
+        run: python -m unittest -v test_core.py
