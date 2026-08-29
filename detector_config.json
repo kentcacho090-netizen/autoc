@@ -5,5 +5,11 @@
     "dark_elixir": [650, 180, 400, 100],
     "builder_gold": [650, 0, 400, 100],
     "builder_elixir": [650, 90, 400, 100]
+  },
+  "confidence_threshold": 0.7,
+  "max_stale_seconds": 30,
+  "ocr": {
+    "scale": 3,
+    "psm": 7
   }
 }
