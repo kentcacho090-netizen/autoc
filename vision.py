@@ -9,7 +9,7 @@ import tempfile
 from typing import Dict, Optional
 
 try:
-    from PIL import Image, ImageOps, ImageEnhance
+    from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 except ImportError:
     Image = None
 
@@ -17,6 +17,8 @@ except ImportError:
 @dataclass
 class Observation:
     village: str = "unknown"
+    orientation: str = "unknown"
+    screen_size: str = "unknown"
     resources: Dict[str, Optional[int]] = field(default_factory=lambda: {
         "gold": None, "elixir": None, "dark_elixir": None,
         "builder_gold": None, "builder_elixir": None,
@@ -25,13 +27,14 @@ class Observation:
     confidence: float = 0.0
     source: str = "none"
     regions_read: int = 0
+    diagnostics: str = ""
 
     def to_dict(self):
         return asdict(self)
 
 
 class ScreenDetector:
-    """Capture screenshots and OCR configured regions with Termux tesseract."""
+    """Capture screenshots and OCR game HUD regions with native Termux tesseract."""
 
     def __init__(self, controller, config_path="detector_config.json"):
         self.controller = controller
@@ -53,10 +56,24 @@ class ScreenDetector:
         return self.controller.take_screenshot(filename)
 
     @staticmethod
+    def _screen_geometry(image_path):
+        with Image.open(image_path) as image:
+            width, height = image.size
+        if width > height:
+            orientation = "landscape"
+        elif height > width:
+            orientation = "portrait"
+        else:
+            orientation = "square"
+        return width, height, orientation
+
+    @staticmethod
     def parse_number(text: str):
         if not text:
             return None
-        cleaned = text.upper().replace("O", "0").replace("I", "1").replace("L", "1")
+        cleaned = text.upper()
+        cleaned = cleaned.replace("O", "0").replace("I", "1").replace("L", "1")
+        cleaned = cleaned.replace("S", "5").replace("B", "8")
         match = re.search(r"\d[\d,\.]*\s*[KMB]?", cleaned)
         if not match:
             return None
@@ -79,19 +96,27 @@ class ScreenDetector:
             if region and Image is not None:
                 image = Image.open(image_path).convert("RGB")
                 x, y, w, h = [int(v) for v in region]
-                crop = image.crop((max(0, x), max(0, y), max(0, x + w), max(0, y + h)))
-                crop = ImageOps.grayscale(crop)
-                crop = ImageEnhance.Contrast(crop).enhance(2.0)
-                crop = crop.resize((max(1, crop.width * self.scale), max(1, crop.height * self.scale)))
+                crop = image.crop((max(0, x), max(0, y), min(image.width, x + w), min(image.height, y + h)))
+                gray = ImageOps.grayscale(crop)
+                gray = ImageEnhance.Contrast(gray).enhance(2.5)
+                gray = gray.filter(ImageFilter.SHARPEN)
+                gray = gray.resize((max(1, gray.width * self.scale), max(1, gray.height * self.scale)))
                 fd, temporary = tempfile.mkstemp(suffix=".png")
                 os.close(fd)
-                crop.save(temporary)
+                gray.save(temporary)
                 source = temporary
-            result = subprocess.run(
-                ["tesseract", source, "stdout", "--psm", str(self.psm)],
-                capture_output=True, text=True, timeout=15,
-            )
-            return result.stdout.strip()
+
+            # Try the configured mode first, then a single-line mode for HUD counters.
+            outputs = []
+            for psm in (self.psm, 6, 7, 11):
+                result = subprocess.run(
+                    ["tesseract", source, "stdout", "--psm", str(psm), "-c", "tessedit_char_whitelist=0123456789KMBkmb,."],
+                    capture_output=True, text=True, timeout=15,
+                )
+                text = result.stdout.strip()
+                if text:
+                    outputs.append(text)
+            return " | ".join(dict.fromkeys(outputs))
         except (OSError, subprocess.SubprocessError):
             return ""
         finally:
@@ -100,6 +125,23 @@ class ScreenDetector:
                     os.unlink(temporary)
                 except OSError:
                     pass
+
+    def _dynamic_regions(self, width, height):
+        """Return percentage-based HUD candidates; works across landscape resolutions."""
+        if width >= height:
+            # The observed cloud-phone game is landscape. Counters are normally on the
+            # upper-right HUD. Keep several overlapping candidates so calibration can
+            # discover which one gives readable text without hard-coding a resolution.
+            return {
+                "hud_top": [int(width * 0.73), 0, int(width * 0.27), int(height * 0.22)],
+                "hud_right": [int(width * 0.78), 0, int(width * 0.22), int(height * 0.42)],
+                "hud_right_wide": [int(width * 0.65), 0, int(width * 0.35), int(height * 0.35)],
+            }
+        return {
+            "hud_top": [int(width * 0.60), 0, int(width * 0.40), int(height * 0.18)],
+            "hud_right": [int(width * 0.70), 0, int(width * 0.30), int(height * 0.35)],
+            "hud_right_wide": [int(width * 0.55), 0, int(width * 0.45), int(height * 0.30)],
+        }
 
     def observe(self, image_path=None) -> Observation:
         path = image_path or self.capture()
@@ -110,11 +152,20 @@ class ScreenDetector:
         if Image is None:
             return Observation(source="pillow_missing")
 
+        try:
+            width, height, orientation = self._screen_geometry(path)
+        except Exception as exc:
+            return Observation(source="image_error", diagnostics=str(exc))
+
+        configured = dict(self.regions)
+        configured.update(self._dynamic_regions(width, height))
         texts = {}
-        for name, region in self.regions.items():
+        for name, region in configured.items():
             if isinstance(region, (list, tuple)) and len(region) == 4:
                 texts[name] = self._read_region(path, region)
 
+        # Prefer explicitly configured semantic regions. Dynamic HUD OCR is retained as
+        # diagnostic text until we have a calibrated mapping for this device/game layout.
         aliases = {
             "gold": ("gold", "home_gold"),
             "elixir": ("elixir", "home_elixir"),
@@ -136,14 +187,20 @@ class ScreenDetector:
         else:
             village = "unknown"
 
-        configured = len(texts)
-        readable = sum(bool(v) for v in texts.values())
-        confidence = min(1.0, readable / max(1, configured))
+        dynamic_text = " ".join(texts.get(k, "") for k in ("hud_top", "hud_right", "hud_right_wide") if texts.get(k))
+        configured_names = [k for k in self.regions if isinstance(self.regions.get(k), (list, tuple))]
+        readable = sum(bool(texts.get(k)) for k in configured_names)
+        confidence = min(1.0, readable / max(1, len(configured_names)))
+        diagnostics = f"dynamic_hud={dynamic_text[:500]}" if dynamic_text else "dynamic_hud=(none)"
+
         return Observation(
             village=village,
+            orientation=orientation,
+            screen_size=f"{width}x{height}",
             resources=resources,
             text=" ".join(v for v in texts.values() if v),
             confidence=confidence,
             source="tesseract",
             regions_read=readable,
+            diagnostics=diagnostics,
         )
