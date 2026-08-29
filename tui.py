@@ -51,15 +51,6 @@ def banner(status="STOPPED"):
     print("=" * 62)
 
 
-def toggle(path):
-    settings = load_settings()
-    obj = settings
-    for key in path[:-1]:
-        obj = obj[key]
-    obj[path[-1]] = not obj[path[-1]]
-    save_settings(settings)
-
-
 def settings_menu():
     while True:
         s = load_settings()
@@ -88,32 +79,37 @@ def settings_menu():
         elif choice == "2":
             sub_toggle([("smart_upgrades", "Smart upgrades"), ("smart_lab", "Smart laboratory"), ("smart_walls", "Smart walls")], "builder_base")
         elif choice == "3":
-            s = load_settings(); s['farming']['enabled'] = not s['farming']['enabled']
+            s = load_settings()
+            s['farming']['enabled'] = not s['farming']['enabled']
             value = input("Max opponent skips (Enter keeps current): ").strip()
-            if value.isdigit(): s['farming']['max_opponent_skips'] = min(100, int(value))
+            if value.isdigit():
+                s['farming']['max_opponent_skips'] = min(100, int(value))
             save_settings(s)
         elif choice == "4":
             s = load_settings()
             value = input("Strategy [balanced/progression/conservative] : ").strip().lower()
-            if value in {"balanced", "progression", "conservative"}: s['strategy'] = value
+            if value in {"balanced", "progression", "conservative"}:
+                s['strategy'] = value
             save_settings(s)
         elif choice == "5":
             s = load_settings()
             value = input(f"Cycle delay seconds [{s['timing']['cycle_delay']}] : ").strip()
-            if value.isdigit(): s['timing']['cycle_delay'] = max(1, int(value))
+            if value.isdigit():
+                s['timing']['cycle_delay'] = max(1, int(value))
             save_settings(s)
 
 
 def sub_toggle(items, section):
-    s = load_settings()
     while True:
+        s = load_settings()
         banner()
         print(f"--- {section.replace('_', ' ').title()} ---")
         for i, (key, label) in enumerate(items, 1):
             print(f"[{i}] {label:<20}: {yn(s[section][key])}")
         print("[0] Back")
         choice = input("\nChoose : ").strip()
-        if choice == "0": return
+        if choice == "0":
+            return
         if choice.isdigit() and 1 <= int(choice) <= len(items):
             key = items[int(choice) - 1][0]
             s[section][key] = not s[section][key]
@@ -122,8 +118,15 @@ def sub_toggle(items, section):
 
 def run_test():
     banner("TEST")
+    settings = load_settings()
     controller = AndroidController()
     print("Android control:", "READY" if controller.check_connection() else "FAILED")
+    package = settings.get("target_app", "")
+    if package:
+        print(f"Target app     : {package}")
+        print("Launching target app before capture...")
+        controller.launch(package)
+        time.sleep(3)
     path = controller.take_screenshot("autoc_test.png")
     if not path:
         print("Screenshot: FAILED")
