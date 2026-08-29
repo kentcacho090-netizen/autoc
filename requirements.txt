@@ -1,4 +1,2 @@
-Flask>=3.0,<4
-opencv-python-headless>=4.10,<5
-pytesseract>=0.3.13,<1
-Pillow>=10,<13
+# AutoC uses the Termux tesseract package for OCR.
+# Python runtime is intentionally dependency-light for Android/Termux.
