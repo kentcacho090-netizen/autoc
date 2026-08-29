@@ -1,6 +1,7 @@
 {
   "enabled": false,
   "strategy": "balanced",
+  "detector_config": "detector_config.json",
   "home_village": {
     "enabled": true,
     "smart_upgrades": true,
