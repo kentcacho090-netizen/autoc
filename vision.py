@@ -21,12 +21,8 @@ class Observation:
     screen_size: str = "unknown"
     game_viewport: str = "unknown"
     resources: Dict[str, Optional[int]] = field(default_factory=lambda: {
-        "gold": None,
-        "elixir": None,
-        "dark_elixir": None,
-        "builder_gold": None,
-        "builder_elixir": None,
-        "gems": None,
+        "gold": None, "elixir": None, "dark_elixir": None,
+        "builder_gold": None, "builder_elixir": None, "gems": None,
     })
     text: str = ""
     confidence: float = 0.0
@@ -39,11 +35,11 @@ class Observation:
 
 
 class ScreenDetector:
-    """Lightweight Termux detector tuned for a 1280x720 CoC landscape canvas.
+    """CoC resource OCR for a 1280x720 landscape screenshot.
 
-    Resource OCR deliberately isolates the white number glyphs before calling
-    Tesseract. This prevents foliage, icons, and other game elements from being
-    interpreted as huge resource values.
+    The HUD number is near the far right of each resource bar. The detector
+    deliberately rejects OCR strings containing arbitrary letters so values
+    such as Tesseract's previous ``mm 7`` cannot become the resource value 7.
     """
 
     def __init__(self, controller, config_path="detector_config.json"):
@@ -52,7 +48,7 @@ class ScreenDetector:
         self.regions = self.config.get("regions", {})
         ocr = self.config.get("ocr", {})
         self.scale = max(2, int(ocr.get("scale", 4)))
-        self.threshold = int(ocr.get("threshold", 165))
+        self.threshold = int(ocr.get("threshold", 180))
 
     @staticmethod
     def _load_config(path):
@@ -69,24 +65,20 @@ class ScreenDetector:
     def parse_number(text):
         if not text:
             return None
-        cleaned = text.upper().replace("O", "0").replace("I", "1").replace("L", "1")
-        cleaned = cleaned.replace("S", "5").replace("B", "8")
-        # Ignore punctuation that commonly appears between spaced digits.
-        cleaned = re.sub(r"\s+", "", cleaned)
-        matches = re.findall(r"\d+(?:[\.,]\d+)*[KMB]?", cleaned)
-        if not matches:
+        raw = text.strip().upper().replace(" ", "")
+        # Tesseract sometimes ignores the whitelist. Reject those hallucinated
+        # letters instead of silently converting them to numbers.
+        if not re.fullmatch(r"[0-9][0-9,\.]*[KMB]?", raw):
             return None
-        token = matches[0].replace(",", "")
-        suffix = token[-1:] if token[-1:] in "KMB" else ""
+        suffix = raw[-1:] if raw[-1:] in "KMB" else ""
+        token = raw[:-1] if suffix else raw
         if suffix:
-            token = token[:-1]
-        # A decimal point is a decimal only when an explicit suffix is present.
-        if suffix:
+            token = token.replace(",", "")
             try:
-                return int(float(token.replace(",", "")) * {"K": 10**3, "M": 10**6, "B": 10**9}[suffix])
+                return int(float(token) * {"K": 10**3, "M": 10**6, "B": 10**9}[suffix])
             except ValueError:
                 return None
-        token = token.replace(".", "")
+        token = token.replace(",", "").replace(".", "")
         try:
             return int(token)
         except ValueError:
@@ -94,12 +86,7 @@ class ScreenDetector:
 
     @staticmethod
     def _find_game_viewport(image):
-        # For screenshots produced directly by screencap on the cloud phone,
-        # the game already occupies the full 1280x720 canvas. Keep a generic
-        # color-based fallback for phone UI screenshots containing black bars.
         w, h = image.size
-        if w > h and w >= 1000 and h >= 600:
-            return image, (0, 0, w, h), "none"
         return image, (0, 0, w, h), "none"
 
     @staticmethod
@@ -111,26 +98,27 @@ class ScreenDetector:
         bottom = min(image.height, int((y + h) * image.height))
         return image.crop((left, top, right, bottom))
 
-    @staticmethod
-    def _white_text_mask(crop):
-        """Keep bright low-saturation pixels used by CoC's white HUD digits."""
+    def _white_text_mask(self, crop):
+        """Extract bright neutral/white HUD glyph pixels."""
         rgb = crop.convert("RGB")
         px = rgb.load()
         out = Image.new("L", rgb.size, 0)
         opx = out.load()
+        threshold = self.threshold
         for y in range(rgb.height):
             for x in range(rgb.width):
                 r, g, b = px[x, y]
                 hi = max(r, g, b)
                 lo = min(r, g, b)
-                if hi >= 165 and (hi - lo) <= 70 and (r + g + b) >= 520:
+                # CoC digits are bright and substantially less saturated than
+                # the colored resource icons/background.
+                if hi >= threshold and (hi - lo) <= 55 and (r + g + b) >= 560:
                     opx[x, y] = 255
-        # Slightly thicken the glyph cores, then remove isolated specks.
         out = out.filter(ImageFilter.MaxFilter(3))
         out = out.filter(ImageFilter.MedianFilter(3))
         return out
 
-    def _tesseract(self, image, psm, whitelist="0123456789KMBkmb"):
+    def _tesseract(self, image, psm):
         if Image is None or not shutil.which("tesseract"):
             return ""
         temp = None
@@ -141,11 +129,9 @@ class ScreenDetector:
             result = subprocess.run(
                 [
                     "tesseract", temp, "stdout", "--psm", str(psm),
-                    "-c", f"tessedit_char_whitelist={whitelist}",
+                    "-c", "tessedit_char_whitelist=0123456789KMB",
                 ],
-                capture_output=True,
-                text=True,
-                timeout=12,
+                capture_output=True, text=True, timeout=12,
             )
             return result.stdout.strip()
         except (OSError, subprocess.SubprocessError):
@@ -163,16 +149,13 @@ class ScreenDetector:
         bbox = mask.getbbox()
         if not bbox:
             return None, "", 0.0
-        # Remove right-side icon pixels by using the left portion of the region.
-        # The supplied reference HUD has the number immediately left of each
-        # resource icon, so this is safe across scaled versions of the same HUD.
-        bw = bbox[2] - bbox[0]
-        bh = bbox[3] - bbox[1]
-        if bw < 8 or bh < 5:
+
+        bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if bw < 10 or bh < 6:
             return None, "", 0.0
-        # Tight crop around white glyphs, with a small border.
-        pad_x = max(2, int(bw * 0.06))
-        pad_y = max(2, int(bh * 0.25))
+
+        pad_x = max(3, int(bw * 0.08))
+        pad_y = max(3, int(bh * 0.30))
         x1 = max(0, bbox[0] - pad_x)
         y1 = max(0, bbox[1] - pad_y)
         x2 = min(mask.width, bbox[2] + pad_x)
@@ -191,36 +174,26 @@ class ScreenDetector:
         if not outputs:
             return None, "", 0.0
 
-        # Prefer an exact agreement between OCR modes. Never choose the largest
-        # number merely because it is large.
         counts = {}
         for value, raw in outputs:
             counts[value] = counts.get(value, 0) + 1
         best_value = max(counts, key=lambda v: (counts[v], -len(str(v))))
         agreeing = counts[best_value]
-        confidence = min(0.99, 0.55 + 0.2 * agreeing)
+        confidence = min(0.99, 0.55 + 0.20 * agreeing)
         raw_text = " | ".join(raw for value, raw in outputs if value == best_value)
         return best_value, raw_text, confidence
 
     @staticmethod
     def _default_hud_regions():
-        # Calibrated from the supplied 1280x720 landscape Home Village image.
-        # Regions intentionally cover the number glyphs, not the resource icons.
+        # The supplied reference resource crops show the number near the far
+        # right edge of each ~260 px HUD bar. These regions are shifted right
+        # compared with the previous version, which was clipping the digits.
         return {
-            "gold": [0.835, 0.018, 0.090, 0.070],
-            "elixir": [0.835, 0.105, 0.090, 0.070],
-            "dark_elixir": [0.835, 0.190, 0.090, 0.070],
-            "gems": [0.835, 0.275, 0.090, 0.070],
+            "gold": [0.900, 0.018, 0.075, 0.070],
+            "elixir": [0.900, 0.105, 0.075, 0.070],
+            "dark_elixir": [0.900, 0.190, 0.075, 0.070],
+            "gems": [0.900, 0.275, 0.075, 0.070],
         }
-
-    @staticmethod
-    def _generic_number_region(name):
-        return {
-            "gold": [0.835, 0.018, 0.090, 0.070],
-            "elixir": [0.835, 0.105, 0.090, 0.070],
-            "dark_elixir": [0.835, 0.190, 0.090, 0.070],
-            "gems": [0.835, 0.275, 0.090, 0.070],
-        }.get(name)
 
     def observe(self, image_path=None):
         path = image_path or self.capture()
@@ -236,19 +209,19 @@ class ScreenDetector:
                 original = original.convert("RGB")
                 width, height = original.size
                 game, bounds, rotation = self._find_game_viewport(original)
-                configured = self.regions if isinstance(self.regions, dict) else {}
                 regions = self._default_hud_regions()
+
+                configured = self.regions if isinstance(self.regions, dict) else {}
                 for key in regions:
                     candidate = configured.get(key)
-                    if not (isinstance(candidate, (list, tuple)) and len(candidate) == 4):
-                        candidate = self._generic_number_region(key)
-                    if candidate:
-                        # Never use the previous overly-wide crops for resources.
+                    if isinstance(candidate, (list, tuple)) and len(candidate) == 4:
                         regions[key] = list(candidate)
 
-                resources = {"gold": None, "elixir": None, "dark_elixir": None, "builder_gold": None, "builder_elixir": None, "gems": None}
-                raw_parts = []
-                confs = []
+                resources = {
+                    "gold": None, "elixir": None, "dark_elixir": None,
+                    "builder_gold": None, "builder_elixir": None, "gems": None,
+                }
+                raw_parts, confs = [], []
                 for key in ("gold", "elixir", "dark_elixir", "gems"):
                     value, raw, conf = self._resource_number(game, regions[key])
                     resources[key] = value
@@ -256,16 +229,12 @@ class ScreenDetector:
                         raw_parts.append(f"{key}:{raw}")
                         confs.append(conf)
 
-                # Builder count is a separate right-side UI element and is not
-                # reliable to infer from resource OCR. Leave it unknown until
-                # its dedicated detector is added.
-                home_hits = sum(resources[k] is not None for k in ("gold", "elixir"))
-                de_hit = resources["dark_elixir"] is not None
-                village = "home" if home_hits + int(de_hit) >= 2 else "unknown"
+                hits = sum(resources[k] is not None for k in ("gold", "elixir", "dark_elixir"))
+                village = "home" if hits >= 2 else "unknown"
                 confidence = sum(confs) / len(confs) if confs else 0.0
                 diagnostics = (
                     f"viewport={bounds[0]},{bounds[1]}-{bounds[2]},{bounds[3]}; "
-                    f"rotation={rotation}; resource_regions=number-only; "
+                    f"rotation={rotation}; resource_regions=number-only-right; "
                     f"raw=" + " || ".join(raw_parts)
                 )
                 return Observation(
