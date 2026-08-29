@@ -1,9 +1,4 @@
-"""Human-readable diagnostic report generation for AutoC.
-
-This module converts the latest local diagnostic JSON into a compact report that
-can be inspected on the Android device after an unattended run. It performs no
-network access and never executes Android commands.
-"""
+"""Human-readable diagnostic report generation for AutoC."""
 from __future__ import annotations
 
 import json
@@ -41,6 +36,20 @@ class DiagnosticReporter:
             parts.append(f"{name}={value if value is not None else 'unknown'}")
         return "Resources : " + " | ".join(parts)
 
+    @staticmethod
+    def _target_line(targets: Any) -> str:
+        if not isinstance(targets, list):
+            return "Targets   : unavailable"
+        visible = []
+        for target in targets[:12]:
+            if not isinstance(target, dict):
+                continue
+            name = str(target.get("name", "unknown"))
+            confidence = target.get("confidence")
+            source = str(target.get("source", "unknown"))
+            visible.append(f"{name}@{confidence}({source})")
+        return "Targets   : " + (" | ".join(visible) if visible else "none")
+
     def render(self, data: Dict[str, Any] | None = None) -> str:
         payload = data if data is not None else self.load()
         observation = payload.get("observation") or {}
@@ -49,10 +58,11 @@ class DiagnosticReporter:
         error = payload.get("error")
 
         timestamp = payload.get("timestamp")
-        if isinstance(timestamp, (int, float)):
-            stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-        else:
-            stamp = "unknown"
+        stamp = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+            if isinstance(timestamp, (int, float))
+            else "unknown"
+        )
 
         lines = [
             "AutoC Diagnostic Report",
@@ -62,12 +72,13 @@ class DiagnosticReporter:
             f"Screen    : {observation.get('screen_size', 'unknown')}",
             f"Confidence: {observation.get('confidence', 'unknown')}",
             self._resource_line(observation.get("resources")),
+            self._target_line(payload.get("targets")),
+            f"Phase     : {payload.get('phase', progress.get('last_phase', 'unknown'))}",
             f"Action    : {decision.get('action', 'unknown')}",
             f"Reason    : {decision.get('reason', 'unknown')}",
-            f"Phase     : {progress.get('phase', 'unknown')}",
             f"Cycles    : {progress.get('cycles', 'unknown')}",
-            f"Successes : {progress.get('actions_succeeded', 'unknown')}",
-            f"Refused   : {progress.get('actions_refused', 'unknown')}",
+            f"Successes : {progress.get('successful_actions', 'unknown')}",
+            f"Refused   : {progress.get('refused_actions', 'unknown')}",
             f"Errors    : {progress.get('errors', 'unknown')}",
             f"Error     : {error or 'none'}",
             "",
