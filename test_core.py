@@ -4,7 +4,7 @@ from __future__ import annotations
 import unittest
 
 from accessibility import AccessibilityInspector
-from automation_state import Action, SmartAutomationStateMachine, Target
+from automation_state import SmartAutomationStateMachine, Target
 from strategy import AccountState, SmartPlanner
 from vision import ScreenDetector
 
@@ -35,12 +35,21 @@ class VisionTests(unittest.TestCase):
 
 
 class SafetyTests(unittest.TestCase):
-    def test_missing_exact_target_refuses_action(self):
+    def test_missing_target_refuses_action(self):
         machine = SmartAutomationStateMachine(min_target_confidence=0.80)
         decision = type("Decision", (), {"action": "building_upgrade", "reason": "test", "safe": True})()
-        action = machine.plan_action(decision, {"upgrade": Target("upgrade", (100, 100), 0.99)})
+        action = machine.plan_action(decision, {})
         self.assertFalse(action.safe)
         self.assertIsNone(action.target)
+
+    def test_action_category_can_use_verified_upgrade_button(self):
+        machine = SmartAutomationStateMachine(min_target_confidence=0.80)
+        decision = type("Decision", (), {"action": "building_upgrade", "reason": "test", "safe": True})()
+        target = Target("upgrade", (100, 100), 0.99)
+        action = machine.plan_action(decision, {"upgrade": target})
+        self.assertTrue(action.safe)
+        self.assertEqual(action.target.name, "upgrade")
+        self.assertTrue(machine.before_action(action))
 
     def test_low_confidence_target_refuses_action(self):
         machine = SmartAutomationStateMachine(min_target_confidence=0.80)
