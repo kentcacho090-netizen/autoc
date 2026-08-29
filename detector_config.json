@@ -18,7 +18,7 @@
     "y": 0.47,
     "wait_seconds": 0.65,
     "auto_scan": true,
-    "scan_span": 0.30,
-    "scan_steps": 5
+    "scan_span": 0.24,
+    "scan_steps": 3
   }
 }
