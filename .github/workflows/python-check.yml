@@ -1,0 +1,50 @@
+name: Python checks
+
+on:
+  push:
+    branches:
+      - smart-automation-foundation
+  pull_request:
+    branches:
+      - smart-automation-foundation
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python files
+        run: python -m compileall -q .
+
+      - name: Validate JSON configuration
+        run: python - <<'PY'
+import json
+from pathlib import Path
+for path in Path('.').glob('*.json'):
+    with path.open('r', encoding='utf-8') as handle:
+        json.load(handle)
+print('JSON configuration valid')
+PY
+
+      - name: Import application modules
+        run: python - <<'PY'
+import main
+import tui
+import bot_service
+import engine
+import strategy
+import automation_state
+import progress
+import vision
+import townhall
+import ui_targets
+import verified_actions
+print('Application imports valid')
+PY
