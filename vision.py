@@ -1,10 +1,10 @@
 """Screen observation layer for AutoC.
 
-This module turns an Android screenshot into structured observations. It is
-intentionally conservative: values are only marked as detected when OCR and
-region configuration provide evidence. No game state is guessed.
+Turns Android screenshots into conservative structured observations. Game
+specific actions should only run after the required state is confirmed.
 """
 from dataclasses import dataclass, field, asdict
+import json
 import os
 import re
 from typing import Dict, Optional, Tuple
@@ -30,33 +30,49 @@ class Observation:
     text: str = ""
     confidence: float = 0.0
     source: str = "none"
+    regions_read: int = 0
 
     def to_dict(self):
         return asdict(self)
 
 
 class ScreenDetector:
-    """Capture/OCR helper with configurable screen regions."""
-
-    def __init__(self, controller, regions=None):
+    def __init__(self, controller, config_path="detector_config.json"):
         self.controller = controller
-        self.regions = regions or {}
+        self.config = self._load_config(config_path)
+        self.regions = self.config.get("regions", {})
+        self.confidence_threshold = float(self.config.get("confidence_threshold", 0.7))
+        ocr = self.config.get("ocr", {})
+        self.scale = max(1, int(ocr.get("scale", 3)))
+        self.psm = int(ocr.get("psm", 7))
+
+    @staticmethod
+    def _load_config(path):
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     def capture(self, filename="autoc_observation.png"):
         return self.controller.take_screenshot(filename)
 
-    def _read_region(self, image, region: Tuple[int, int, int, int]) -> str:
+    def _read_region(self, image, region) -> str:
         if cv2 is None or pytesseract is None:
             return ""
         x, y, w, h = [int(v) for v in region]
-        crop = image[max(0, y):max(0, y) + max(1, h),
-                     max(0, x):max(0, x) + max(1, w)]
+        if w <= 0 or h <= 0:
+            return ""
+        crop = image[max(0, y):max(0, y + h), max(0, x):max(0, x + w)]
         if crop.size == 0:
             return ""
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.resize(gray, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
         _, threshold = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        return pytesseract.image_to_string(threshold, config="--psm 7").strip()
+        return pytesseract.image_to_string(threshold, config=f"--psm {self.psm}").strip()
 
     @staticmethod
     def parse_number(text: str):
@@ -67,11 +83,10 @@ class ScreenDetector:
         if not match:
             return None
         token = match.group(0).replace(",", "").replace(" ", "")
-        multiplier = 1
         suffix = token[-1:] if token else ""
+        multiplier = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1)
         if suffix in "KMB":
             token = token[:-1]
-            multiplier = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}[suffix]
         try:
             return int(float(token) * multiplier)
         except ValueError:
@@ -83,7 +98,6 @@ class ScreenDetector:
             return Observation(source="screenshot_failed")
         if cv2 is None or pytesseract is None:
             return Observation(source="ocr_dependencies_missing")
-
         image = cv2.imread(path)
         if image is None:
             return Observation(source="image_failed")
@@ -91,10 +105,8 @@ class ScreenDetector:
         texts = {}
         for name, region in self.regions.items():
             if isinstance(region, (list, tuple)) and len(region) == 4:
-                texts[name] = self._read_region(image, tuple(region))
+                texts[name] = self._read_region(image, region)
 
-        full_text = " ".join(v for v in texts.values() if v)
-        resources = {}
         aliases = {
             "gold": ("gold", "home_gold"),
             "elixir": ("elixir", "home_elixir"),
@@ -102,17 +114,21 @@ class ScreenDetector:
             "builder_gold": ("builder_gold", "bb_gold"),
             "builder_elixir": ("builder_elixir", "bb_elixir"),
         }
-        for resource, names in aliases.items():
-            value = next((self.parse_number(texts[n]) for n in names if n in texts), None)
-            resources[resource] = value
+        resources = {k: next((self.parse_number(texts[n]) for n in names if texts.get(n)), None)
+                     for k, names in aliases.items()}
 
-        village = "unknown"
-        if any(k in texts for k in ("builder_gold", "builder_elixir", "bb_gold", "bb_elixir")):
+        home_hits = sum(resources[k] is not None for k in ("gold", "elixir", "dark_elixir"))
+        bb_hits = sum(resources[k] is not None for k in ("builder_gold", "builder_elixir"))
+        if bb_hits > home_hits:
             village = "builder_base"
-        elif any(k in texts for k in ("gold", "elixir", "dark_elixir", "home_gold", "home_elixir", "de")):
+        elif home_hits:
             village = "home"
+        else:
+            village = "unknown"
 
         configured = len(texts)
-        confidence = min(1.0, configured / 5.0) if configured else 0.0
-        return Observation(village=village, resources=resources, text=full_text,
-                           confidence=confidence, source="ocr")
+        readable = sum(bool(v) for v in texts.values())
+        confidence = min(1.0, readable / max(1, configured))
+        return Observation(village=village, resources=resources,
+                           text=" ".join(v for v in texts.values() if v),
+                           confidence=confidence, source="ocr", regions_read=readable)
