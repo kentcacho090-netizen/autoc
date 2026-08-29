@@ -8,6 +8,7 @@ import time
 
 from bot_service import BotService
 from engine import AndroidController
+from townhall import TownHallProbe
 from vision import ScreenDetector
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -154,6 +155,40 @@ def run_test():
     input("\nPress Enter...")
 
 
+def run_townhall_test():
+    banner("TOWN HALL TEST")
+    settings = load_settings()
+    controller = AndroidController()
+    print("Android control:", "READY" if controller.check_connection() else "FAILED")
+    package = settings.get("target_app", "com.supercell.clashofclans")
+    if not controller.package_installed(package):
+        print("Target app    : NOT INSTALLED")
+        input("\nPress Enter...")
+        return
+
+    print("Launching target app...")
+    if not controller.launch(package, wait=4):
+        print("Launch result : FAILED")
+        input("\nPress Enter...")
+        return
+
+    print("Town Hall probe: tapping the configured Town Hall point...")
+    print("The panel will be read and closed automatically.")
+    try:
+        result = TownHallProbe(controller, CONFIG_FILE).probe("autoc_townhall.png")
+        print("Tap point    :", result.tap)
+        print("Town Hall    :", result.level if result.level is not None else "NOT DETECTED")
+        print("Confidence   :", f"{result.confidence:.0%}")
+        print("OCR text     :", result.raw_text[:900] or "(none)")
+        print("Diagnostics  :", result.diagnostics)
+        print("Panel image  :", result.screenshot or "(none)")
+        if result.level is None:
+            print("Tip: if the tap missed the Town Hall, we will calibrate the x/y point from the next screenshot.")
+    except Exception as exc:
+        print("Town Hall test error:", exc)
+    input("\nPress Enter...")
+
+
 def main():
     bot = BotService(SETTINGS_FILE)
     while True:
@@ -161,7 +196,8 @@ def main():
         print("[1] Start / Stop Bot")
         print("[2] Smart Automation Settings")
         print("[3] Test Android + Screenshot + OCR")
-        print("[4] Reload Settings")
+        print("[4] Test Town Hall detection")
+        print("[5] Reload Settings")
         print("[Q] Exit")
         choice = input("\nChoose : ").strip().lower()
         if choice == "1":
@@ -173,6 +209,8 @@ def main():
         elif choice == "3":
             run_test()
         elif choice == "4":
+            run_townhall_test()
+        elif choice == "5":
             bot.reload()
         elif choice == "q":
             bot.stop()
