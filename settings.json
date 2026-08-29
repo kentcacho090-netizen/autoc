@@ -23,6 +23,7 @@
   },
   "vision": {
     "confidence_threshold": 0.70,
+    "target_confidence_threshold": 0.80,
     "max_action_failures": 3,
     "progress_interval_seconds": 60
   },
