@@ -1,49 +1,63 @@
-# engine.py
+"""Android control layer for a rooted cloud-phone Termux environment."""
+import os
+import shutil
 import subprocess
 import time
-import random
 
-class ADBController:
-    def __init__(self):
-        self.device = "localhost:5555" # Change if using USB/Emulator
 
-    def run_cmd(self, command):
-        """Executes an ADB command and returns output."""
-        full_cmd = f"adb -s {self.device} {command}"
+class AndroidController:
+    def __init__(self, use_root=True):
+        self.use_root = use_root and shutil.which("su") is not None
+
+    def run(self, command):
+        """Run an Android shell command locally or through root."""
+        if self.use_root:
+            args = ["su", "-c", command]
+        else:
+            args = ["sh", "-c", command]
         try:
-            result = subprocess.run(full_cmd.split(), capture_output=True, text=True, check=True)
-            return result.stdout
-        except subprocess.CalledProcessError as e:
-            print(f"Error: {e}")
+            result = subprocess.run(args, capture_output=True, text=True, check=True)
+            return result.stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            print(f"[Android] Command failed: {exc}")
             return None
 
     def tap(self, x, y):
-        """Simulates a tap."""
-        # Add slight randomization to avoid bot detection patterns
-        x_rand = x + random.randint(-5, 5)
-        y_rand = y + random.randint(-5, 5)
-        print(f"[Action] Tapping at {x_rand}, {y_rand}")
-        self.run_cmd(f"shell input tap {x_rand} {y_rand}")
-        time.sleep(0.5)
+        print(f"[Action] Tapping at {x}, {y}")
+        return self.run(f"input tap {int(x)} {int(y)}")
 
     def swipe(self, x1, y1, x2, y2, duration=300):
-        """Simulates a swipe."""
-        print(f"[Action] Swiping")
-        self.run_cmd(f"shell input swipe {x1} {y1} {x2} {y2} {duration}")
-        time.sleep(1)
+        print(f"[Action] Swiping {x1},{y1} -> {x2},{y2}")
+        return self.run(f"input swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} {int(duration)}")
+
+    def launch(self, package):
+        """Launch an Android package using monkey."""
+        return self.run(f"monkey -p {package} 1")
 
     def take_screenshot(self, filename="screen.png"):
-        """Takes a screenshot and pulls it to local storage."""
-        self.run_cmd(f"shell screencap -p /sdcard/{filename}")
-        self.run_cmd(f"pull /sdcard/{filename} ./{filename}")
-        print(f"[System] Screenshot saved as {filename}")
+        """Save a screenshot in the current Termux directory."""
+        target = os.path.abspath(filename)
+        remote = "/sdcard/autoc_screen.png"
+        if not self.run(f"screencap -p {remote}") is None:
+            if self.use_root:
+                self.run(f"cp {remote} {target}")
+            else:
+                # Non-root fallback: Android may expose the file to shell.
+                self.run(f"cat {remote} > {target}")
+            print(f"[System] Screenshot saved as {target}")
+            return target
+        return None
 
     def check_connection(self):
-        """Checks if ADB is connected."""
-        result = self.run_cmd("get-state")
-        if "device" in result:
-            print("[System] ADB Connected!")
-            return True
+        if self.use_root:
+            result = self.run("id")
+            connected = bool(result and "uid=" in result)
         else:
-            print("[System] ADB Disconnected. Please check connection.")
-            return False
+            result = self.run("id")
+            connected = result is not None
+        print("[System] Android control ready." if connected else "[System] Android control unavailable.")
+        return connected
+
+
+# Backwards-compatible name used by older code.
+ADBController = AndroidController
