@@ -1,6 +1,7 @@
 {
   "enabled": false,
   "strategy": "balanced",
+  "target_app": "com.supercell.clashofclans",
   "detector_config": "detector_config.json",
   "home_village": {
     "enabled": true,
