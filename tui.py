@@ -140,11 +140,15 @@ def run_test():
         return
     try:
         observation = ScreenDetector(controller, CONFIG_FILE).observe(path)
-        print("Screenshot: OK")
-        print("Village   :", observation.village)
-        print("Resources :", observation.resources)
-        print("OCR       :", observation.text[:500] or "(none)")
-        print("Confidence:", f"{observation.confidence:.0%}")
+        print("Screenshot : OK")
+        print("Screen     :", observation.screen_size)
+        print("Orientation:", observation.orientation)
+        print("Village    :", observation.village)
+        print("Resources  :", observation.resources)
+        print("OCR        :", observation.text[:500] or "(none)")
+        print("Confidence :", f"{observation.confidence:.0%}")
+        print("Diagnostics:", observation.diagnostics[:700])
+        print("Image      :", path)
     except Exception as exc:
         print("Vision test error:", exc)
     input("\nPress Enter...")
