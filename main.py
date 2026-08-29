@@ -1,54 +1,84 @@
-# main.py
+"""AUTO - Android Clash of Clans automation entry point.
+
+This version prioritizes reliability: connect -> launch -> screenshot ->
+observe. It never blindly taps guessed coordinates. Game actions should only
+be enabled after the corresponding screen has been positively detected.
+"""
+from __future__ import annotations
+
+import argparse
 import time
-from engine import ADBController
+
 import config
+from engine import ADBController, ADBError
+from vision import ScreenDetector
 
-def main():
-    print("🚀 Starting MarineoClash Lite...")
-    bot = ADBController()
 
+def print_observation(obs) -> None:
+    print("\n========== AUTO OBSERVATION ==========")
+    print(f"Village      : {obs.village}")
+    print(f"Screen       : {obs.screen_size} ({obs.orientation})")
+    print(f"Gold         : {obs.resources.get('gold')}")
+    print(f"Elixir       : {obs.resources.get('elixir')}")
+    print(f"Dark Elixir  : {obs.resources.get('dark_elixir')}")
+    print(f"Gems         : {obs.resources.get('gems')}")
+    print(f"OCR          : {obs.text or '(none)'}")
+    print(f"Confidence   : {obs.confidence:.0%}")
+    print(f"Source       : {obs.source}")
+    if obs.diagnostics:
+        print(f"Diagnostics  : {obs.diagnostics}")
+    print("=====================================")
+
+
+def observe_once(bot: ADBController, detector: ScreenDetector):
+    path = detector.capture(config.SCREENSHOT_FILE)
+    obs = detector.observe(path)
+    print_observation(obs)
+    return obs
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="AUTO Android CoC automation")
+    parser.add_argument("--once", action="store_true", help="capture and observe once, then exit")
+    parser.add_argument("--loop", action="store_true", help="keep observing until Ctrl+C")
+    parser.add_argument("--no-launch", action="store_true", help="do not launch Clash of Clans")
+    args = parser.parse_args()
+
+    print("AUTO - SMART AUTOMATION")
+    print("Mode: OBSERVE (safe; no blind taps)\n")
+
+    bot = ADBController(device=config.ADB_DEVICE or None)
     if not bot.check_connection():
-        return
+        return 1
 
-    # --- MAIN LOOP ---
-    while True:
-        print("\n--- New Cycle ---")
-        
-        # 1. Collect Resources
-        print("Collecting resources...")
-        bot.tap(*config.BTN_COLLECT_ALL)
-        time.sleep(2)
+    try:
+        if not args.no_launch:
+            print(f"[Android] Launching {config.TARGET_PACKAGE}...")
+            bot.launch(config.TARGET_PACKAGE)
 
-        # 2. Start Attack Search
-        print("Searching for opponent...")
-        bot.tap(*config.BTN_ATTACK)
-        time.sleep(5)
+        detector = ScreenDetector(bot, config.DETECTOR_CONFIG)
+        observe_once(bot, detector)
 
-        # 3. Find Match (Loop until we find one or give up)
-        # For now, we just click 'Next' a few times to simulate searching
-        for i in range(3):
-            print(f"Checking opponent {i+1}...")
-            time.sleep(2) 
-            # In a real bot, you would use OpenCV here to analyze the screenshot
-            # to see if the loot is good. For now, we just click Next.
-            bot.tap(*config.BTN_NEXT_OPPONENT)
-            time.sleep(3)
+        if args.once:
+            return 0
 
-        # 4. Attack (Blindly for this example)
-        print("Deploying troops...")
-        bot.tap(*config.BTN_GO)
-        
-        # Wait for battle to end
-        print(f"Waiting {config.TIME_TO_WAIT_FOR_BATTLE} seconds for battle...")
-        time.sleep(config.TIME_TO_WAIT_FOR_BATTLE)
+        # Default to loop mode so `python main.py` remains useful.
+        print(f"[System] Rechecking every {config.OBSERVE_INTERVAL:.1f}s. Press Ctrl+C to stop.")
+        while True:
+            time.sleep(config.OBSERVE_INTERVAL)
+            observe_once(bot, detector)
 
-        # 5. Return Home
-        print("Returning home...")
-        bot.tap(*config.BTN_RETURN_HOME)
-        time.sleep(5)
+    except KeyboardInterrupt:
+        print("\n[System] Stopped by user.")
+        return 0
+    except (ADBError, OSError, ValueError) as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+    except Exception as exc:
+        # Keep unexpected failures visible without dumping an unreadable crash.
+        print(f"[ERROR] Unexpected failure: {type(exc).__name__}: {exc}")
+        return 1
 
-        print("Cycle complete. Sleeping...")
-        time.sleep(config.TIME_BETWEEN_ATTACKS)
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
