@@ -47,6 +47,8 @@ import townhall
 import accessibility
 import ui_targets
 import verified_actions
+import diagnostics
+import diagnostic_report
 print('Application imports valid')
 PY
 
