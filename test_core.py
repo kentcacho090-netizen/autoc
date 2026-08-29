@@ -4,7 +4,9 @@ from __future__ import annotations
 import unittest
 
 from accessibility import AccessibilityInspector
-from automation_state import SmartAutomationStateMachine, Target
+from action_gate import SemanticActionGate
+from automation_state import Action, SmartAutomationStateMachine, Target
+from selection_context import SelectionContextDetector
 from strategy import AccountState, SmartPlanner
 from vision import ScreenDetector
 
@@ -67,6 +69,77 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue(action.safe)
         self.assertIsNotNone(action.target)
         self.assertTrue(machine.before_action(action))
+
+    def test_generic_upgrade_without_object_context_is_refused(self):
+        gate = SemanticActionGate(min_context_confidence=0.85)
+        action = Action(
+            name="building_upgrade",
+            target=Target("upgrade", (100, 100), 0.99),
+            reason="test",
+            safe=True,
+        )
+        self.assertFalse(gate.authorize(action, action.target, None))
+
+
+class SelectionContextTests(unittest.TestCase):
+    def setUp(self):
+        self.detector = SelectionContextDetector()
+        self.target = Target("upgrade", (100, 100), 0.96)
+
+    def test_building_label_authorizes_building_upgrade(self):
+        context = self.detector.identify(
+            "building_upgrade",
+            self.target,
+            ["Cannon Level 8", "Upgrade"],
+            "home",
+            0.94,
+        )
+        self.assertIsNotNone(context)
+        self.assertEqual(context.object_type, "building")
+        self.assertIn("building", context.features)
+
+    def test_upgrade_label_alone_does_not_identify_building(self):
+        context = self.detector.identify(
+            "building_upgrade",
+            self.target,
+            ["Upgrade"],
+            "home",
+            0.99,
+        )
+        self.assertIsNone(context)
+
+    def test_laboratory_context_is_specific(self):
+        context = self.detector.identify(
+            "laboratory",
+            self.target,
+            ["Laboratory", "Research"],
+            "home",
+            0.95,
+        )
+        self.assertIsNotNone(context)
+        self.assertEqual(context.object_type, "laboratory")
+        self.assertIn("laboratory", context.features)
+
+    def test_builder_laboratory_exposes_required_feature(self):
+        context = self.detector.identify(
+            "builder_lab",
+            self.target,
+            ["Laboratory", "Research"],
+            "builder_base",
+            0.95,
+        )
+        self.assertIsNotNone(context)
+        self.assertIn("builder_laboratory", context.features)
+
+    def test_wrong_object_type_does_not_authorize_hero(self):
+        context = self.detector.identify(
+            "hero_upgrade",
+            self.target,
+            ["Cannon", "Upgrade"],
+            "home",
+            0.95,
+        )
+        self.assertIsNone(context)
 
 
 class StrategyTests(unittest.TestCase):
