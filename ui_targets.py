@@ -1,9 +1,10 @@
-"""Verified UI-target detection for AutoC.
+"""Verified dynamic UI-target detection for AutoC.
 
-Targets are discovered from the current screenshot. AutoC never taps a
-hard-coded coordinate through this module: a target must be visible in the
-fresh screenshot and its OCR bounding box must satisfy confidence and size
-checks.
+AutoC combines Android accessibility hierarchy data with screenshot OCR.
+Accessibility supplies semantic bounds when Android exposes them; OCR covers
+game-rendered text that is not present in the accessibility tree.  Neither
+channel is allowed to create an executable tap by itself: callers still pass
+the resulting target through the verified action gate.
 """
 from __future__ import annotations
 
@@ -13,14 +14,17 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, Optional
 
 try:
-    from PIL import Image, ImageEnhance, ImageOps
+    from PIL import Image
 except ImportError:
     Image = None
-    ImageEnhance = None
-    ImageOps = None
+
+try:
+    from accessibility import AccessibilityInspector
+except ImportError:
+    AccessibilityInspector = None
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,11 @@ class UITarget:
     width: int
     height: int
     confidence: float
+    source: str = "ocr"
+
+    @property
+    def center(self) -> tuple[int, int]:
+        return self.x, self.y
 
 
 TARGET_ALIASES = {
@@ -42,48 +51,39 @@ TARGET_ALIASES = {
     "return_home": ("return home", "return"),
     "builder": ("builder", "builders"),
     "laboratory": ("laboratory", "research"),
+    "hero_upgrade": ("upgrade", "hero"),
+    "building_upgrade": ("upgrade",),
+    "wall_upgrade": ("upgrade", "wall"),
+    "builder_lab": ("upgrade", "research"),
+    "builder_upgrade": ("upgrade",),
+    "builder_wall_upgrade": ("upgrade", "wall"),
 }
 
 
 class UITargetDetector:
-    def __init__(self, confidence_threshold: float = 0.55):
-        self.confidence_threshold = max(0.0, min(1.0, float(confidence_threshold)))
+    def __init__(self, confidence_threshold: float = 0.55, accessibility=None):
+        self.confidence_threshold = confidence_threshold
+        if accessibility is not None:
+            self.accessibility = accessibility
+        elif AccessibilityInspector is not None:
+            self.accessibility = AccessibilityInspector()
+        else:
+            self.accessibility = None
 
-    @staticmethod
-    def _norm(text: str) -> str:
-        return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-
-    @staticmethod
-    def _union(words: Sequence[Tuple[str, int, int, int, int, float]]):
-        x1 = min(item[1] for item in words)
-        y1 = min(item[2] for item in words)
-        x2 = max(item[1] + item[3] for item in words)
-        y2 = max(item[2] + item[4] for item in words)
-        confidence = min(item[5] for item in words)
-        text = " ".join(item[0] for item in words)
-        return text, x1, y1, x2 - x1, y2 - y1, confidence
-
-    def _ocr_pass(self, image_path: str, psm: int):
+    def _ocr_data(self, image_path: str):
+        """Return OCR word boxes from an image."""
         if Image is None or not shutil.which("tesseract"):
             return []
         temp = None
         try:
-            with Image.open(image_path) as source:
-                image = source.convert("RGB")
-                if psm == 6 and ImageOps is not None and ImageEnhance is not None:
-                    gray = ImageOps.grayscale(image)
-                    image = ImageOps.autocontrast(gray)
-                    image = ImageEnhance.Contrast(image).enhance(1.6)
+            with Image.open(image_path) as im:
+                im = im.convert("RGB")
                 fd, temp = tempfile.mkstemp(suffix=".png")
                 os.close(fd)
-                image.save(temp, format="PNG")
+                im.save(temp, format="PNG")
 
             result = subprocess.run(
-                [
-                    "tesseract", temp, "stdout", "--psm", str(psm), "tsv",
-                    "-c", "load_system_dawg=0",
-                    "-c", "load_freq_dawg=0",
-                ],
+                ["tesseract", temp, "stdout", "--psm", "11", "tsv"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -98,21 +98,13 @@ class UITargetDetector:
                 if len(cols) < 12:
                     continue
                 try:
-                    block = int(cols[2])
-                    paragraph = int(cols[3])
-                    line_number = int(cols[4])
-                    word_number = int(cols[5])
-                    x, y, w, h = map(int, cols[6:10])
                     confidence = float(cols[10]) / 100.0
                     text = cols[11].strip()
+                    x, y, width, height = map(int, cols[6:10])
                 except (ValueError, IndexError):
                     continue
-                if not text or confidence < self.confidence_threshold or w < 5 or h < 5:
-                    continue
-                rows.append((
-                    block, paragraph, line_number, word_number,
-                    text, x, y, w, h, confidence,
-                ))
+                if text and confidence >= self.confidence_threshold and width >= 5 and height >= 5:
+                    rows.append((text, x, y, width, height, confidence))
             return rows
         except (OSError, subprocess.SubprocessError):
             return []
@@ -123,84 +115,85 @@ class UITargetDetector:
                 except OSError:
                     pass
 
-    def _ocr_data(self, image_path: str):
-        """Return normalized OCR word records from two complementary passes."""
-        raw = self._ocr_pass(image_path, 11)
-        if not raw:
-            raw = self._ocr_pass(image_path, 6)
-        words = []
-        for block, paragraph, line_number, word_number, text, x, y, w, h, confidence in raw:
-            words.append((
-                text, x, y, w, h, confidence,
-                (block, paragraph, line_number), word_number,
-            ))
-        return words
+    @staticmethod
+    def _norm(text: str) -> str:
+        return re.sub(r"[^a-z0-9 ]+", " ", text.lower()).strip()
 
     @staticmethod
-    def _line_phrases(words):
-        """Build 1-4 word phrases from OCR words on the same text line."""
-        grouped = {}
-        for item in words:
-            text, x, y, w, h, conf, line_key, word_number = item
-            grouped.setdefault(line_key, []).append(item)
+    def _contains_variant(normalized: str, variant: str) -> bool:
+        normalized_variant = re.sub(r"[^a-z0-9 ]+", " ", variant.lower()).strip()
+        if not normalized_variant:
+            return False
+        return normalized_variant in normalized
 
-        phrases = []
-        for line_words in grouped.values():
-            line_words.sort(key=lambda item: (item[1], item[7]))
-            for start in range(len(line_words)):
-                for length in range(1, min(4, len(line_words) - start) + 1):
-                    selected = line_words[start:start + length]
-                    phrases.append((
-                        selected[0][0] if length == 1 else " ".join(item[0] for item in selected),
-                        min(item[1] for item in selected),
-                        min(item[2] for item in selected),
-                        max(item[1] + item[3] for item in selected) - min(item[1] for item in selected),
-                        max(item[2] + item[4] for item in selected) - min(item[2] for item in selected),
-                        min(item[5] for item in selected),
-                    ))
-        return phrases
+    def _accessibility_targets(self, names: tuple[str, ...]) -> list[UITarget]:
+        if self.accessibility is None:
+            return []
+        try:
+            nodes = self.accessibility.find(
+                variant for name in names for variant in TARGET_ALIASES.get(name, (name,))
+            )
+        except Exception:
+            return []
 
-    @staticmethod
-    def _match_alias(normalized: str, aliases: Sequence[str]):
-        return next((alias for alias in aliases if normalized == alias), None)
+        targets: list[UITarget] = []
+        for node in nodes:
+            searchable = node.searchable_text
+            normalized = self._norm(searchable)
+            for name in names:
+                variants = TARGET_ALIASES.get(name, (name,))
+                if any(self._contains_variant(normalized, variant) for variant in variants):
+                    left, top, right, bottom = node.bounds
+                    width = right - left
+                    height = bottom - top
+                    confidence = 0.97 if node.clickable else 0.90
+                    targets.append(
+                        UITarget(
+                            name=name,
+                            text=searchable,
+                            x=(left + right) // 2,
+                            y=(top + bottom) // 2,
+                            width=width,
+                            height=height,
+                            confidence=confidence,
+                            source="accessibility",
+                        )
+                    )
+                    break
+        return targets
 
     def find(self, image_path: str, names: Optional[Iterable[str]] = None):
         wanted = tuple(names or TARGET_ALIASES.keys())
-        aliases = {
-            name: tuple(self._norm(alias) for alias in TARGET_ALIASES.get(name, (name,)))
-            for name in wanted
-        }
+        targets = self._accessibility_targets(wanted)
         words = self._ocr_data(image_path)
-        if not words:
-            return []
-
-        candidates = []
-        for text, x, y, w, h, confidence in self._line_phrases(words):
+        for text, x, y, width, height, confidence in words:
             normalized = self._norm(text)
-            for name, variants in aliases.items():
-                alias = self._match_alias(normalized, variants)
-                if alias is None:
-                    continue
-                candidates.append(UITarget(
-                    name=name,
-                    text=text,
-                    x=x + w // 2,
-                    y=y + h // 2,
-                    width=w,
-                    height=h,
-                    confidence=confidence,
-                ))
+            for name in wanted:
+                variants = TARGET_ALIASES.get(name, (name,))
+                if any(self._contains_variant(normalized, variant) for variant in variants):
+                    targets.append(
+                        UITarget(
+                            name=name,
+                            text=text,
+                            x=x + width // 2,
+                            y=y + height // 2,
+                            width=width,
+                            height=height,
+                            confidence=confidence,
+                            source="ocr",
+                        )
+                    )
+        return self._deduplicate(targets)
 
-        # Remove exact duplicates produced by overlapping phrase windows or
-        # multiple OCR passes while keeping the strongest observation.
-        unique = {}
-        for target in candidates:
-            key = (target.name, target.x, target.y, self._norm(target.text))
-            current = unique.get(key)
-            if current is None or target.confidence > current.confidence:
-                unique[key] = target
-
-        return list(unique.values())
+    @staticmethod
+    def _deduplicate(targets: list[UITarget]) -> list[UITarget]:
+        selected: dict[tuple[str, int, int], UITarget] = {}
+        for target in targets:
+            key = (target.name, target.x // 8, target.y // 8)
+            previous = selected.get(key)
+            if previous is None or target.confidence > previous.confidence:
+                selected[key] = target
+        return sorted(selected.values(), key=lambda target: target.confidence, reverse=True)
 
     def best(self, image_path: str, name: str) -> Optional[UITarget]:
         matches = [target for target in self.find(image_path, (name,)) if target.name == name]
