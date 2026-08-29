@@ -2,6 +2,7 @@ import json
 import threading
 import time
 
+from action_gate import SelectionContext, SemanticActionGate
 from engine import ADBController
 from strategy import AccountState, SmartPlanner
 from automation_state import SmartAutomationStateMachine, Target
@@ -46,6 +47,12 @@ class BotService:
             ),
             max_failures=int(vision_settings.get("max_action_failures", 3)),
         )
+        self.action_gate = SemanticActionGate(
+            min_context_confidence=max(
+                0.85,
+                float(vision_settings.get("context_confidence_threshold", 0.85)),
+            )
+        )
         self.progress_interval = progress_interval
 
     def toggle(self):
@@ -88,6 +95,44 @@ class BotService:
             if previous is None or target.confidence > previous.confidence:
                 result[detected.name] = target
         return result
+
+    @staticmethod
+    def _selection_context(action, target, observation):
+        """Create context only from semantic evidence already present on screen.
+
+        A generic ``Upgrade`` target deliberately produces no object context.
+        This prevents a building upgrade from being authorized merely because
+        an Upgrade button happens to be visible.
+        """
+        if target is None:
+            return None
+        text = target.text.lower()
+        features = set()
+        if action == "laboratory" and ("laboratory" in text or "research" in text):
+            features.add("laboratory")
+        elif action == "hero_upgrade" and "hero" in text:
+            features.add("hero")
+        elif action == "wall_upgrade" and "wall" in text:
+            features.add("wall")
+        elif action == "builder_lab" and ("laboratory" in text or "research" in text):
+            features.add("builder_laboratory")
+        elif action == "builder_wall_upgrade" and "wall" in text:
+            features.add("builder_wall")
+        elif action == "builder_upgrade" and "builder" in text:
+            features.add("builder_building")
+        elif action == "building_upgrade":
+            return None
+        else:
+            return None
+
+        return SelectionContext(
+            object_type=next(iter(features), None),
+            object_name=None,
+            village=getattr(observation, "village", "unknown"),
+            source=target.source,
+            confidence=min(target.confidence, getattr(observation, "confidence", 0.0)),
+            features=frozenset(features),
+        )
 
     def _write_diagnostics(self, error=None):
         return self.diagnostics.write(
@@ -179,8 +224,14 @@ class BotService:
                 )
                 print(f"[ActionGate] {action.name}: {action.reason}")
 
+                context = self._selection_context(action.name, action.target, observation)
                 if action.target is None:
                     self.progress.action_refused(action.reason or "No verified target")
+                elif not self.action_gate.authorize(action, action.target, context):
+                    self.progress.action_refused(
+                        f"Semantic context did not authorize {action.name}"
+                    )
+                    print("[ActionGate] Refused: target lacks sufficient semantic context")
                 elif self.machine.before_action(action):
                     result = verified_actions.tap_named(action.name)
                     self.machine.after_action(result.ok, None if result.ok else result.reason)
