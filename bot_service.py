@@ -25,11 +25,12 @@ class BotService:
     def reload(self):
         with open(self.settings_file, "r", encoding="utf-8") as f:
             self.settings = json.load(f)
-        threshold = float(self.settings.get("vision", {}).get("confidence_threshold", 0.70))
+        vision = self.settings.get("vision", {})
+        threshold = float(vision.get("confidence_threshold", 0.70))
         self.planner = SmartPlanner(self.settings.get("strategy", "balanced"), threshold)
         self.machine = SmartAutomationStateMachine(
             min_target_confidence=max(0.80, threshold),
-            max_failures=int(self.settings.get("vision", {}).get("max_action_failures", 3)),
+            max_failures=max(1, int(vision.get("max_action_failures", 3))),
         )
 
     def toggle(self):
@@ -38,7 +39,8 @@ class BotService:
     def start(self):
         if self.running:
             return
-        self.progress = ProgressReporter(interval_seconds=60.0)
+        interval = self.settings.get("vision", {}).get("progress_interval_seconds", 60)
+        self.progress = ProgressReporter(interval_seconds=interval)
         self.running = True
         self._thread = threading.Thread(target=self.run, name="autoc-bot", daemon=True)
         self._thread.start()
