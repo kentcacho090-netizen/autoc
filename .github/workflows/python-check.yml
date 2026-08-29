@@ -44,6 +44,7 @@ import automation_state
 import progress
 import vision
 import townhall
+import accessibility
 import ui_targets
 import verified_actions
 print('Application imports valid')
