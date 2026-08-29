@@ -19,6 +19,7 @@ class Observation:
     village: str = "unknown"
     orientation: str = "unknown"
     screen_size: str = "unknown"
+    game_viewport: str = "unknown"
     resources: Dict[str, Optional[int]] = field(default_factory=lambda: {
         "gold": None, "elixir": None, "dark_elixir": None,
         "builder_gold": None, "builder_elixir": None,
@@ -34,7 +35,7 @@ class Observation:
 
 
 class ScreenDetector:
-    """Capture screenshots and OCR game HUD regions with native Termux tesseract."""
+    """Capture screenshots, isolate the game viewport, then OCR its HUD."""
 
     def __init__(self, controller, config_path="detector_config.json"):
         self.controller = controller
@@ -59,12 +60,7 @@ class ScreenDetector:
     def _screen_geometry(image_path):
         with Image.open(image_path) as image:
             width, height = image.size
-        if width > height:
-            orientation = "landscape"
-        elif height > width:
-            orientation = "portrait"
-        else:
-            orientation = "square"
+        orientation = "landscape" if width > height else "portrait" if height > width else "square"
         return width, height, orientation
 
     @staticmethod
@@ -87,30 +83,102 @@ class ScreenDetector:
         except ValueError:
             return None
 
-    def _read_region(self, image_path, region=None):
+    @staticmethod
+    def _find_game_viewport(image):
+        """Find the largest saturated rectangular game area in a phone screenshot.
+
+        The observed cloud-phone layout places the game as a rotated landscape surface
+        with black bars around it and a control strip on the right. This method does not
+        rely on the exact 691x1536 screenshot dimensions.
+        """
+        width, height = image.size
+        rgb = image.convert("RGB")
+        # Downsample for inexpensive row/column analysis.
+        sample_w = min(256, width)
+        sample_h = min(256, height)
+        small = rgb.resize((sample_w, sample_h))
+        px = small.load()
+
+        row_hits = []
+        for y in range(sample_h):
+            hits = 0
+            for x in range(sample_w):
+                r, g, b = px[x, y]
+                if max(r, g, b) - min(r, g, b) >= 25 and (r + g + b) >= 75:
+                    hits += 1
+            row_hits.append(hits / sample_w)
+
+        col_hits = []
+        for x in range(sample_w):
+            hits = 0
+            for y in range(sample_h):
+                r, g, b = px[x, y]
+                if max(r, g, b) - min(r, g, b) >= 25 and (r + g + b) >= 75:
+                    hits += 1
+            col_hits.append(hits / sample_h)
+
+        def longest_segment(values, threshold=0.20):
+            best = (0, len(values) - 1)
+            start = None
+            for i, value in enumerate(values + [0.0]):
+                if value >= threshold and start is None:
+                    start = i
+                elif value < threshold and start is not None:
+                    candidate = (start, i - 1)
+                    if candidate[1] - candidate[0] > best[1] - best[0]:
+                        best = candidate
+                    start = None
+            return best
+
+        ys = longest_segment(row_hits)
+        xs = longest_segment(col_hits)
+        x1 = int(xs[0] * width / sample_w)
+        x2 = int((xs[1] + 1) * width / sample_w)
+        y1 = int(ys[0] * height / sample_h)
+        y2 = int((ys[1] + 1) * height / sample_h)
+
+        # Refine each edge inward/outward with a small safety margin. Avoid tiny or
+        # implausible crops; fall back to the whole image if detection is uncertain.
+        if x2 - x1 < width * 0.45 or y2 - y1 < height * 0.35:
+            return image, (0, 0, width, height), "full-screen-fallback"
+        viewport = image.crop((x1, y1, x2, y2))
+        if viewport.height > viewport.width:
+            viewport = viewport.rotate(90, expand=True)
+            rotated = "ccw"
+        else:
+            rotated = "none"
+        return viewport, (x1, y1, x2, y2), rotated
+
+    def _read_region(self, image, region=None):
         if not shutil.which("tesseract"):
             return ""
-        source = image_path
+        source = None
         temporary = None
         try:
             if region and Image is not None:
-                image = Image.open(image_path).convert("RGB")
-                x, y, w, h = [int(v) for v in region]
-                crop = image.crop((max(0, x), max(0, y), min(image.width, x + w), min(image.height, y + h)))
+                x, y, w, h = [float(v) for v in region]
+                crop = image.crop((
+                    max(0, int(x * image.width)),
+                    max(0, int(y * image.height)),
+                    min(image.width, int((x + w) * image.width)),
+                    min(image.height, int((y + h) * image.height)),
+                ))
                 gray = ImageOps.grayscale(crop)
-                gray = ImageEnhance.Contrast(gray).enhance(2.5)
+                gray = ImageEnhance.Contrast(gray).enhance(2.8)
                 gray = gray.filter(ImageFilter.SHARPEN)
                 gray = gray.resize((max(1, gray.width * self.scale), max(1, gray.height * self.scale)))
                 fd, temporary = tempfile.mkstemp(suffix=".png")
                 os.close(fd)
                 gray.save(temporary)
                 source = temporary
+            else:
+                source = image
 
-            # Try the configured mode first, then a single-line mode for HUD counters.
             outputs = []
             for psm in (self.psm, 6, 7, 11):
                 result = subprocess.run(
-                    ["tesseract", source, "stdout", "--psm", str(psm), "-c", "tessedit_char_whitelist=0123456789KMBkmb,."],
+                    ["tesseract", source, "stdout", "--psm", str(psm),
+                     "-c", "tessedit_char_whitelist=0123456789KMBkmb,."],
                     capture_output=True, text=True, timeout=15,
                 )
                 text = result.stdout.strip()
@@ -126,21 +194,17 @@ class ScreenDetector:
                 except OSError:
                     pass
 
-    def _dynamic_regions(self, width, height):
-        """Return percentage-based HUD candidates; works across landscape resolutions."""
-        if width >= height:
-            # The observed cloud-phone game is landscape. Counters are normally on the
-            # upper-right HUD. Keep several overlapping candidates so calibration can
-            # discover which one gives readable text without hard-coding a resolution.
-            return {
-                "hud_top": [int(width * 0.73), 0, int(width * 0.27), int(height * 0.22)],
-                "hud_right": [int(width * 0.78), 0, int(width * 0.22), int(height * 0.42)],
-                "hud_right_wide": [int(width * 0.65), 0, int(width * 0.35), int(height * 0.35)],
-            }
+    @staticmethod
+    def _default_hud_regions():
+        """Normalized regions for the rotated landscape Clash HUD seen on the device."""
         return {
-            "hud_top": [int(width * 0.60), 0, int(width * 0.40), int(height * 0.18)],
-            "hud_right": [int(width * 0.70), 0, int(width * 0.30), int(height * 0.35)],
-            "hud_right_wide": [int(width * 0.55), 0, int(width * 0.45), int(height * 0.30)],
+            # Gold, elixir, dark elixir, gems are stacked at the upper-right.
+            "gold": [0.83, 0.005, 0.17, 0.070],
+            "elixir": [0.83, 0.075, 0.17, 0.070],
+            "dark_elixir": [0.83, 0.145, 0.17, 0.070],
+            "gems": [0.86, 0.215, 0.14, 0.070],
+            # Builder count is near the top center-right.
+            "builders": [0.43, 0.005, 0.18, 0.085],
         }
 
     def observe(self, image_path=None) -> Observation:
@@ -153,54 +217,56 @@ class ScreenDetector:
             return Observation(source="pillow_missing")
 
         try:
-            width, height, orientation = self._screen_geometry(path)
+            with Image.open(path) as original:
+                original = original.convert("RGB")
+                width, height = original.size
+                screen_orientation = "landscape" if width > height else "portrait" if height > width else "square"
+                game, bounds, rotation = self._find_game_viewport(original)
+                game_path_fd, game_path = tempfile.mkstemp(suffix=".png")
+                os.close(game_path_fd)
+                game.save(game_path)
+                try:
+                    regions = self._default_hud_regions()
+                    # User config can override any normalized region.
+                    for name, region in self.regions.items():
+                        if isinstance(region, (list, tuple)) and len(region) == 4:
+                            regions[name] = region
+
+                    texts = {name: self._read_region(game, region) for name, region in regions.items()}
+                    resources = {
+                        "gold": self.parse_number(texts.get("gold", "")),
+                        "elixir": self.parse_number(texts.get("elixir", "")),
+                        "dark_elixir": self.parse_number(texts.get("dark_elixir", "")),
+                        "builder_gold": self.parse_number(texts.get("builder_gold", "")),
+                        "builder_elixir": self.parse_number(texts.get("builder_elixir", "")),
+                    }
+                    home_hits = sum(resources[k] is not None for k in ("gold", "elixir", "dark_elixir"))
+                    bb_hits = sum(resources[k] is not None for k in ("builder_gold", "builder_elixir"))
+                    village = "builder_base" if bb_hits > home_hits else "home" if home_hits else "unknown"
+                    readable = sum(bool(texts.get(k)) for k in ("gold", "elixir", "dark_elixir", "builders"))
+                    confidence = readable / 4.0
+                    diagnostics = (
+                        f"viewport={bounds[0]},{bounds[1]}-{bounds[2]},{bounds[3]}; "
+                        f"rotation={rotation}; hud=" + " || ".join(
+                            f"{k}:{v[:120]}" for k, v in texts.items() if v
+                        )
+                    )
+                    return Observation(
+                        village=village,
+                        orientation="landscape" if game.width > game.height else screen_orientation,
+                        screen_size=f"{width}x{height}",
+                        game_viewport=f"{game.width}x{game.height}",
+                        resources=resources,
+                        text=" ".join(v for v in texts.values() if v),
+                        confidence=confidence,
+                        source="tesseract",
+                        regions_read=readable,
+                        diagnostics=diagnostics,
+                    )
+                finally:
+                    try:
+                        os.unlink(game_path)
+                    except OSError:
+                        pass
         except Exception as exc:
             return Observation(source="image_error", diagnostics=str(exc))
-
-        configured = dict(self.regions)
-        configured.update(self._dynamic_regions(width, height))
-        texts = {}
-        for name, region in configured.items():
-            if isinstance(region, (list, tuple)) and len(region) == 4:
-                texts[name] = self._read_region(path, region)
-
-        # Prefer explicitly configured semantic regions. Dynamic HUD OCR is retained as
-        # diagnostic text until we have a calibrated mapping for this device/game layout.
-        aliases = {
-            "gold": ("gold", "home_gold"),
-            "elixir": ("elixir", "home_elixir"),
-            "dark_elixir": ("dark_elixir", "de"),
-            "builder_gold": ("builder_gold", "bb_gold"),
-            "builder_elixir": ("builder_elixir", "bb_elixir"),
-        }
-        resources = {
-            key: next((self.parse_number(texts[name]) for name in names if texts.get(name)), None)
-            for key, names in aliases.items()
-        }
-
-        home_hits = sum(resources[k] is not None for k in ("gold", "elixir", "dark_elixir"))
-        bb_hits = sum(resources[k] is not None for k in ("builder_gold", "builder_elixir"))
-        if bb_hits > home_hits:
-            village = "builder_base"
-        elif home_hits:
-            village = "home"
-        else:
-            village = "unknown"
-
-        dynamic_text = " ".join(texts.get(k, "") for k in ("hud_top", "hud_right", "hud_right_wide") if texts.get(k))
-        configured_names = [k for k in self.regions if isinstance(self.regions.get(k), (list, tuple))]
-        readable = sum(bool(texts.get(k)) for k in configured_names)
-        confidence = min(1.0, readable / max(1, len(configured_names)))
-        diagnostics = f"dynamic_hud={dynamic_text[:500]}" if dynamic_text else "dynamic_hud=(none)"
-
-        return Observation(
-            village=village,
-            orientation=orientation,
-            screen_size=f"{width}x{height}",
-            resources=resources,
-            text=" ".join(v for v in texts.values() if v),
-            confidence=confidence,
-            source="tesseract",
-            regions_read=readable,
-            diagnostics=diagnostics,
-        )
