@@ -9,7 +9,7 @@ from automation_state import SmartAutomationStateMachine, Target
 from diagnostics import DiagnosticStore
 from diagnostic_report import DiagnosticReporter
 from progress import ProgressReporter
-from selection_context import SelectionContextDetector
+from spatial_context import SpatialContextDetector, SpatialEvidence
 from ui_targets import UITargetDetector
 from verified_actions import VerifiedActions
 from vision import ScreenDetector
@@ -54,7 +54,9 @@ class BotService:
                 float(vision_settings.get("context_confidence_threshold", 0.85)),
             )
         )
-        self.context_detector = SelectionContextDetector()
+        self.spatial_context = SpatialContextDetector(
+            max_gap_pixels=int(vision_settings.get("semantic_max_gap_pixels", 220))
+        )
         self.progress_interval = progress_interval
 
     def toggle(self):
@@ -99,21 +101,28 @@ class BotService:
         return result
 
     @staticmethod
-    def _semantic_evidence(action, action_target, ui_detector):
-        """Collect fresh semantic labels without treating Upgrade as an object label."""
-        evidence = []
-        if action_target is not None:
-            evidence.append(action_target.text)
+    def _spatial_evidence(ui_detector):
+        """Convert fresh accessibility nodes into bounded semantic evidence."""
         accessibility = getattr(ui_detector, "accessibility", None)
-        if accessibility is not None:
-            try:
-                nodes = accessibility.dump()
-            except Exception:
-                nodes = []
-            for node in nodes:
-                text = node.searchable_text
-                if text:
-                    evidence.append(text)
+        if accessibility is None:
+            return []
+        try:
+            nodes = accessibility.dump()
+        except Exception:
+            return []
+        evidence = []
+        for node in nodes:
+            text = node.searchable_text
+            if not text:
+                continue
+            evidence.append(
+                SpatialEvidence(
+                    text=text,
+                    bounds=node.bounds,
+                    source="accessibility",
+                    confidence=1.0 if node.clickable else 0.90,
+                )
+            )
         return evidence
 
     def _write_diagnostics(self, error=None):
@@ -209,20 +218,19 @@ class BotService:
                 if action.target is None:
                     self.progress.action_refused(action.reason or "No verified target")
                 else:
-                    evidence = self._semantic_evidence(action.name, action.target, ui_detector)
-                    context = self.context_detector.identify(
+                    evidence = self._spatial_evidence(ui_detector)
+                    context = self.spatial_context.identify(
                         action_name=action.name,
                         target=action.target,
                         evidence=evidence,
                         village=getattr(observation, "village", "unknown"),
-                        confidence=getattr(observation, "confidence", 0.0),
-                        source="accessibility+ocr",
+                        observation_confidence=getattr(observation, "confidence", 0.0),
                     )
                     if not self.action_gate.authorize(action, action.target, context):
                         self.progress.action_refused(
                             f"Semantic context did not authorize {action.name}"
                         )
-                        print("[ActionGate] Refused: target lacks sufficient semantic context")
+                        print("[ActionGate] Refused: target lacks spatial semantic context")
                     elif self.machine.before_action(action):
                         result = verified_actions.tap_named(action.name)
                         self.machine.after_action(result.ok, None if result.ok else result.reason)
