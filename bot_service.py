@@ -5,17 +5,12 @@ import time
 from engine import ADBController
 from strategy import AccountState, SmartPlanner
 from automation_state import SmartAutomationStateMachine
+from progress import ProgressReporter
 from vision import ScreenDetector
 
 
 class BotService:
-    """Long-running smart loop.
-
-    Perception and planning run continuously, but the action gate refuses any
-    tap unless a future vision detector supplies a verified target.  This keeps
-    the bot from repeating the fixed-coordinate Town Hall mistake while the
-    dynamic object detectors are being added.
-    """
+    """Long-running smart loop with safe action gating and progress reporting."""
 
     def __init__(self, settings_file):
         self.settings_file = settings_file
@@ -24,6 +19,7 @@ class BotService:
         self.last_observation = None
         self.last_decision = None
         self.last_phase = "observe"
+        self.progress = ProgressReporter(interval_seconds=60.0)
         self.reload()
 
     def reload(self):
@@ -42,8 +38,9 @@ class BotService:
     def start(self):
         if self.running:
             return
+        self.progress = ProgressReporter(interval_seconds=60.0)
         self.running = True
-        self._thread = threading.Thread(target=self.run, daemon=True)
+        self._thread = threading.Thread(target=self.run, name="autoc-bot", daemon=True)
         self._thread.start()
 
     def stop(self):
@@ -67,11 +64,12 @@ class BotService:
         )
 
         while self.running:
+            self.progress.cycle_started("observe")
             try:
-                self.machine.state.phase = self.machine.state.phase.OBSERVE
-
                 if not controller.check_connection():
                     self.last_phase = "recover"
+                    self.progress.error("Android control unavailable")
+                    self.progress.maybe_report()
                     time.sleep(5)
                     continue
 
@@ -85,8 +83,9 @@ class BotService:
                     "safe": decision.safe,
                 }
 
-                # Dynamic targets will be supplied by the object/template
-                # detector.  An empty target map intentionally means no tap.
+                # The planner decides categories. Until a verified object
+                # detector identifies a matching on-screen target, no tap is
+                # permitted. This prevents fixed-coordinate game actions.
                 action = self.machine.plan_action(decision, targets={})
                 self.last_phase = self.machine.state.phase.value
 
@@ -101,15 +100,29 @@ class BotService:
                 )
                 print(f"[ActionGate] {action.name}: {action.reason}")
 
-                # No guessed coordinates. Once dynamic perception supplies a
-                # verified target, this gate is where execution will occur.
-                if action.target is not None and self.machine.before_action(action):
-                    controller.tap(*action.target.center)
+                if action.target is None:
+                    self.progress.action_refused(action.reason or "No verified target")
+                elif self.machine.before_action(action):
+                    result = controller.tap(*action.target.center)
+                    verified = result is not None
+                    self.machine.after_action(verified, None if verified else "Android tap failed")
+                    self.last_phase = self.machine.state.phase.value
+                    if verified:
+                        self.progress.action_succeeded(action.name)
+                    else:
+                        self.progress.error("Android tap failed")
+                else:
+                    self.progress.action_refused(action.reason or "Action gate refused target")
 
+                self.progress.maybe_report()
                 delay = max(1, int(self.settings.get("timing", {}).get("cycle_delay", 10)))
                 time.sleep(delay)
             except Exception as exc:
                 self.machine.after_action(False, str(exc))
                 self.last_phase = self.machine.state.phase.value
+                self.progress.error(str(exc))
+                self.progress.maybe_report()
                 print(f"[Bot] Recovered from cycle error: {exc}")
                 time.sleep(2)
+
+        self.progress.maybe_report(force=True)
