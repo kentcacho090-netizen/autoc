@@ -2,13 +2,14 @@ import json
 import threading
 import time
 
-from action_gate import SelectionContext, SemanticActionGate
+from action_gate import SemanticActionGate
 from engine import ADBController
 from strategy import AccountState, SmartPlanner
 from automation_state import SmartAutomationStateMachine, Target
 from diagnostics import DiagnosticStore
 from diagnostic_report import DiagnosticReporter
 from progress import ProgressReporter
+from selection_context import SelectionContextDetector
 from ui_targets import UITargetDetector
 from verified_actions import VerifiedActions
 from vision import ScreenDetector
@@ -53,6 +54,7 @@ class BotService:
                 float(vision_settings.get("context_confidence_threshold", 0.85)),
             )
         )
+        self.context_detector = SelectionContextDetector()
         self.progress_interval = progress_interval
 
     def toggle(self):
@@ -97,42 +99,22 @@ class BotService:
         return result
 
     @staticmethod
-    def _selection_context(action, target, observation):
-        """Create context only from semantic evidence already present on screen.
-
-        A generic ``Upgrade`` target deliberately produces no object context.
-        This prevents a building upgrade from being authorized merely because
-        an Upgrade button happens to be visible.
-        """
-        if target is None:
-            return None
-        text = target.text.lower()
-        features = set()
-        if action == "laboratory" and ("laboratory" in text or "research" in text):
-            features.add("laboratory")
-        elif action == "hero_upgrade" and "hero" in text:
-            features.add("hero")
-        elif action == "wall_upgrade" and "wall" in text:
-            features.add("wall")
-        elif action == "builder_lab" and ("laboratory" in text or "research" in text):
-            features.add("builder_laboratory")
-        elif action == "builder_wall_upgrade" and "wall" in text:
-            features.add("builder_wall")
-        elif action == "builder_upgrade" and "builder" in text:
-            features.add("builder_building")
-        elif action == "building_upgrade":
-            return None
-        else:
-            return None
-
-        return SelectionContext(
-            object_type=next(iter(features), None),
-            object_name=None,
-            village=getattr(observation, "village", "unknown"),
-            source=target.source,
-            confidence=min(target.confidence, getattr(observation, "confidence", 0.0)),
-            features=frozenset(features),
-        )
+    def _semantic_evidence(action, action_target, ui_detector):
+        """Collect fresh semantic labels without treating Upgrade as an object label."""
+        evidence = []
+        if action_target is not None:
+            evidence.append(action_target.text)
+        accessibility = getattr(ui_detector, "accessibility", None)
+        if accessibility is not None:
+            try:
+                nodes = accessibility.dump()
+            except Exception:
+                nodes = []
+            for node in nodes:
+                text = node.searchable_text
+                if text:
+                    evidence.append(text)
+        return evidence
 
     def _write_diagnostics(self, error=None):
         return self.diagnostics.write(
@@ -224,24 +206,33 @@ class BotService:
                 )
                 print(f"[ActionGate] {action.name}: {action.reason}")
 
-                context = self._selection_context(action.name, action.target, observation)
                 if action.target is None:
                     self.progress.action_refused(action.reason or "No verified target")
-                elif not self.action_gate.authorize(action, action.target, context):
-                    self.progress.action_refused(
-                        f"Semantic context did not authorize {action.name}"
-                    )
-                    print("[ActionGate] Refused: target lacks sufficient semantic context")
-                elif self.machine.before_action(action):
-                    result = verified_actions.tap_named(action.name)
-                    self.machine.after_action(result.ok, None if result.ok else result.reason)
-                    self.last_phase = self.machine.state.phase.value
-                    if result.ok:
-                        self.progress.action_succeeded(action.name)
-                    else:
-                        self.progress.error(result.reason or "Verified action failed")
                 else:
-                    self.progress.action_refused(action.reason or "Action gate refused target")
+                    evidence = self._semantic_evidence(action.name, action.target, ui_detector)
+                    context = self.context_detector.identify(
+                        action_name=action.name,
+                        target=action.target,
+                        evidence=evidence,
+                        village=getattr(observation, "village", "unknown"),
+                        confidence=getattr(observation, "confidence", 0.0),
+                        source="accessibility+ocr",
+                    )
+                    if not self.action_gate.authorize(action, action.target, context):
+                        self.progress.action_refused(
+                            f"Semantic context did not authorize {action.name}"
+                        )
+                        print("[ActionGate] Refused: target lacks sufficient semantic context")
+                    elif self.machine.before_action(action):
+                        result = verified_actions.tap_named(action.name)
+                        self.machine.after_action(result.ok, None if result.ok else result.reason)
+                        self.last_phase = self.machine.state.phase.value
+                        if result.ok:
+                            self.progress.action_succeeded(action.name)
+                        else:
+                            self.progress.error(result.reason or "Verified action failed")
+                    else:
+                        self.progress.action_refused(action.reason or "Action gate refused target")
 
                 self.progress.maybe_report()
                 self._write_diagnostics()
