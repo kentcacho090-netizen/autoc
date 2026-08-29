@@ -1,0 +1,26 @@
+{
+  "enabled": false,
+  "strategy": "balanced",
+  "home_village": {
+    "enabled": true,
+    "smart_upgrades": true,
+    "smart_walls": true,
+    "smart_heroes": true,
+    "smart_lab": true,
+    "smart_builders": true
+  },
+  "builder_base": {
+    "enabled": true,
+    "smart_upgrades": true,
+    "smart_walls": true,
+    "smart_lab": true
+  },
+  "farming": {
+    "enabled": true,
+    "max_opponent_skips": 10
+  },
+  "timing": {
+    "battle_timeout": 90,
+    "cycle_delay": 10
+  }
+}
