@@ -13,7 +13,16 @@ import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parent
-MODULES = ("config", "engine", "vision", "planner", "ui_targets", "verified_actions", "diagnostics", "diagnostic_report")
+MODULES = (
+    "config",
+    "engine",
+    "vision",
+    "planner",
+    "ui_targets",
+    "verified_actions",
+    "diagnostics",
+    "diagnostic_report",
+)
 
 
 def fail(message: str) -> None:
@@ -37,10 +46,19 @@ def main() -> int:
     cases = {
         "123": 123,
         "1,234": 1234,
+        "1.234": 1234,
+        "1,234,567": 1234567,
+        "1.234.567": 1234567,
         "1.2K": 1200,
+        "1,2K": 1200,
+        "12K": 12000,
         "2.5M": 2500000,
+        "2,5M": 2500000,
+        "1B": 1000000000,
+        "O.5M": 500000,
         "invalid": None,
         "12ABC": None,
+        "-123": None,
     }
     for raw, expected in cases.items():
         actual = ScreenDetector.parse_number(raw)
