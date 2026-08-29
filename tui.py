@@ -130,8 +130,7 @@ def run_test():
         input("\nPress Enter...")
         return
     try:
-        regions = load_regions()
-        observation = ScreenDetector(controller, regions).observe(path)
+        observation = ScreenDetector(controller, CONFIG_FILE).observe(path)
         print("Screenshot: OK")
         print("Village   :", observation.village)
         print("Resources :", observation.resources)
@@ -140,14 +139,6 @@ def run_test():
     except Exception as exc:
         print("Vision test error:", exc)
     input("\nPress Enter...")
-
-
-def load_regions():
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f).get("regions", {})
-    except (OSError, ValueError):
-        return {}
 
 
 def main():
