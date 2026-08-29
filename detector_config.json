@@ -12,5 +12,11 @@
     "psm": 7,
     "threshold": 165,
     "number_only": true
+  },
+  "townhall": {
+    "x": 0.50,
+    "y": 0.47,
+    "wait_seconds": 1.0,
+    "panel": [0.20, 0.05, 0.60, 0.70]
   }
 }
