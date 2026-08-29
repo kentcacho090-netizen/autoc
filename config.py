@@ -1,20 +1,19 @@
-# config.py
+"""AUTO runtime configuration."""
 
-# --- DEVICE SETTINGS ---
-# Run 'adb shell wm size' in Termux to find your resolution
-SCREEN_WIDTH = 1080
-SCREEN_HEIGHT = 2400
+# --- DEVICE / APP ---
+# Leave empty to auto-select the first connected ADB device.
+ADB_DEVICE = ""
+TARGET_PACKAGE = "com.supercell.clashofclans"
 
-# --- COORDINATES (X, Y) ---
-# You must find these by enabling "Pointer Location" in Developer Options
-# and tapping the buttons in COC to get the X,Y values.
+# Your game viewport is 1280x720 landscape.
+SCREEN_WIDTH = 1280
+SCREEN_HEIGHT = 720
 
-BTN_COLLECT_ALL = (900, 2100)   # Example: Bottom right area
-BTN_ATTACK = (540, 2200)        # Example: Bottom center
-BTN_NEXT_OPPONENT = (950, 2150) # Example: 'Next' button in search
-BTN_GO = (980, 2150)            # Example: 'Go' button to start attack
-BTN_RETURN_HOME = (540, 2300)   # Example: End battle/Return home
+# --- DETECTOR ---
+DETECTOR_CONFIG = "detector_config.json"
+SCREENSHOT_FILE = "autoc_observation.png"
+OBSERVE_INTERVAL = 5.0
 
-# --- TIMING (Seconds) ---
-TIME_BETWEEN_ATTACKS = 10
-TIME_TO_WAIT_FOR_BATTLE = 90    # Max time to wait for a battle to finish
+# These are intentionally NOT used by the current main loop. Do not put
+# guessed coordinates here and expect the bot to act on them. Action
+# coordinates must come from a positively detected UI state first.
