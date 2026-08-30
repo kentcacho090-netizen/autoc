@@ -3,9 +3,11 @@ name: Python checks
 on:
   push:
     branches:
+      - main
       - smart-automation-foundation
   pull_request:
     branches:
+      - main
       - smart-automation-foundation
 
 jobs:
