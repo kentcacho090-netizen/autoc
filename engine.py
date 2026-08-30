@@ -1,134 +1,144 @@
-"""Reliable Android/ADB control layer for AUTO.
-
-The controller is deliberately small: it owns ADB discovery, shell commands,
-taps/swipes, and screenshots. Game logic stays outside this module.
-"""
-from __future__ import annotations
-
+"""Android control layer for a rooted cloud-phone Termux environment."""
 import os
-import shlex
+import re
+import shutil
 import subprocess
 import time
-from typing import Optional, Sequence
 
 
-class ADBError(RuntimeError):
-    """Raised when an ADB operation cannot be completed."""
+class AndroidController:
+    def __init__(self, use_root=True):
+        self.use_root = use_root and shutil.which("su") is not None
 
-
-class ADBController:
-    def __init__(self, device: Optional[str] = None, adb_path: str = "adb"):
-        self.adb_path = adb_path
-        self.device = device or os.environ.get("AUTO_ADB_DEVICE")
-
-    def _base(self) -> list[str]:
-        cmd = [self.adb_path]
-        if self.device:
-            cmd += ["-s", self.device]
-        return cmd
-
-    def run(self, *args: str, timeout: float = 15.0, check: bool = True) -> str:
-        """Run ADB without shell=True and return stdout."""
-        cmd = self._base() + [str(a) for a in args]
+    def run(self, command):
+        """Run an Android shell command locally or through root."""
+        args = ["su", "-c", command] if self.use_root else ["sh", "-c", command]
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except FileNotFoundError as exc:
-            raise ADBError("adb was not found. Install Android platform-tools.") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ADBError(f"ADB timed out: {' '.join(shlex.quote(x) for x in cmd)}") from exc
+            result = subprocess.run(args, capture_output=True, text=True, check=True)
+            return result.stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            print(f"[Android] Command failed: {exc}")
+            return None
 
-        if check and result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
-            raise ADBError(f"ADB failed ({result.returncode}): {detail or 'unknown error'}")
-        return result.stdout
+    def tap(self, x, y):
+        print(f"[Action] Tapping at {x}, {y}")
+        return self.run(f"input tap {int(x)} {int(y)}")
 
-    def _ensure_device(self) -> str:
-        """Select the first ready device when no device was configured."""
-        if self.device:
-            state = self.run("get-state", check=False).strip()
-            if state == "device":
-                return self.device
-            raise ADBError(f"Configured ADB device '{self.device}' is not ready ({state or 'no response'}).")
+    def swipe(self, x1, y1, x2, y2, duration=300):
+        print(f"[Action] Swiping {x1},{y1} -> {x2},{y2}")
+        return self.run(f"input swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} {int(duration)}")
 
-        output = self.run("devices", check=True)
-        devices = []
-        for line in output.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 2 and parts[1] == "device":
-                devices.append(parts[0])
-        if not devices:
-            raise ADBError("No Android device is connected to ADB.")
-        self.device = devices[0]
-        return self.device
+    def package_installed(self, package):
+        result = self.run(f"pm path {package}")
+        return bool(result and result.startswith("package:"))
 
-    def check_connection(self) -> bool:
-        try:
-            self._ensure_device()
-            print(f"[Android] ADB device ready: {self.device}")
-            return True
-        except ADBError as exc:
-            print(f"[Android] {exc}")
-            return False
-
-    def tap(self, x: int, y: int, wait: float = 0.35) -> None:
-        x, y = int(x), int(y)
-        print(f"[Action] Tap ({x}, {y})")
-        self.run("shell", "input", "tap", str(x), str(y), timeout=5)
-        if wait:
-            time.sleep(wait)
-
-    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int = 300, wait: float = 0.5) -> None:
-        print(f"[Action] Swipe ({x1},{y1}) -> ({x2},{y2}) {duration}ms")
-        self.run("shell", "input", "swipe", str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), str(int(duration)), timeout=8)
-        if wait:
-            time.sleep(wait)
-
-    def keyevent(self, key: str, wait: float = 0.25) -> None:
-        self.run("shell", "input", "keyevent", str(key), timeout=5)
-        if wait:
-            time.sleep(wait)
-
-    def launch(self, package: str) -> None:
-        """Bring a package to the foreground."""
-        self.run("shell", "monkey", "-p", package, "1", timeout=20)
-        time.sleep(2)
-
-    def current_package(self) -> Optional[str]:
-        out = self.run(
-            "shell", "dumpsys", "activity", "activities", timeout=10, check=False
+    def foreground_package(self):
+        """Return the best package signal available on the cloud phone."""
+        commands = (
+            "dumpsys activity activities | grep -E 'mResumedActivity|mFocusedActivity' | tail -n 5",
+            "dumpsys window windows | grep -E 'mFocusedApp|mCurrentFocus' | tail -n 5",
         )
-        # Android versions expose mResumedActivity or ResumedActivity.
-        for line in out.splitlines():
-            if "mResumedActivity" in line or "ResumedActivity" in line:
-                parts = line.split()
-                for token in parts:
-                    if "/" in token and "." in token.split("/")[0]:
-                        return token.split("/")[0].strip("}")
+        for command in commands:
+            result = self.run(command)
+            if not result:
+                continue
+            packages = re.findall(r"([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)/", result)
+            if packages:
+                return packages[0]
         return None
 
-    def take_screenshot(self, filename: str = "autoc_observation.png") -> str:
-        """Capture directly through exec-out, avoiding remote pull races."""
-        directory = os.path.dirname(os.path.abspath(filename)) or "."
-        os.makedirs(directory, exist_ok=True)
+    def package_running(self, package):
+        """Check whether Android has a live process for the package."""
+        result = self.run(f"pidof {package}")
+        if result and re.search(r"\d", result):
+            return True
+        result = self.run("dumpsys activity processes | grep -F " + package + " | head -n 5")
+        return bool(result and package in result)
+
+    def resolve_launcher_activity(self, package):
+        """Resolve the package's launcher activity without hard-coding an activity name."""
+        result = self.run(
+            f"cmd package resolve-activity --brief -a android.intent.action.MAIN "
+            f"-c android.intent.category.LAUNCHER {package} | tail -n 1"
+        )
+        if result and "/" in result and package in result:
+            return result.strip()
+        return None
+
+    def launch(self, package, wait=5):
+        """Launch a package. Floating Termux can obscure Android foreground reporting."""
+        if not self.package_installed(package):
+            print(f"[Android] Package not installed: {package}")
+            return False
+
+        activity = self.resolve_launcher_activity(package)
+        result = None
+        if activity:
+            result = self.run(f"am start -n {activity}")
+        if result is None:
+            result = self.run(
+                f"am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p {package}"
+            )
+        if result is None:
+            result = self.run(f"monkey -p {package} 1")
+
+        time.sleep(max(1, int(wait)))
+        current = self.foreground_package()
+        running = self.package_running(package)
+        active = current == package
+        print(f"[Android] Resumed/foreground package: {current or 'unknown'}")
+        print(f"[Android] Target process running: {'YES' if running else 'NO'}")
+
+        if active or running:
+            return True
+        if result is not None:
+            print("[Android] Launch command accepted; foreground is obscured/unreliable.")
+            return True
+        print(f"[Android] Could not launch target: {package}")
+        return False
+
+    def take_screenshot(self, filename="screen.png"):
+        """Capture Android's display and copy it into Termux without root writing to the app sandbox."""
         target = os.path.abspath(filename)
-        cmd = self._base() + ["exec-out", "screencap", "-p"]
-        try:
-            with open(target, "wb") as fh:
-                result = subprocess.run(cmd, stdout=fh, stderr=subprocess.PIPE, timeout=20)
-        except FileNotFoundError as exc:
-            raise ADBError("adb was not found. Install Android platform-tools.") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ADBError("ADB screenshot timed out.") from exc
-        if result.returncode != 0:
-            detail = result.stderr.decode("utf-8", "replace").strip()
-            raise ADBError(f"Screenshot failed: {detail or result.returncode}")
-        if not os.path.isfile(target) or os.path.getsize(target) < 100:
-            raise ADBError("ADB returned an empty/invalid screenshot.")
-        print(f"[System] Screenshot saved as {target}")
-        return target
+        remote = "/sdcard/autoc_screen.png"
+
+        # Capture to shared storage from Android. Then let the Termux Python process
+        # create/write the destination file itself; this avoids SELinux/app-sandbox
+        # failures caused by `su -c cp ... /data/data/com.termux/...`.
+        capture = self.run(f"screencap -p {remote}")
+        if capture is None:
+            print("[System] Screenshot capture failed")
+            return None
+
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        copy_commands = []
+        if self.use_root:
+            copy_commands.append(["su", "-c", f"cat {remote}"])
+        copy_commands.append(["sh", "-c", f"cat {remote}"])
+
+        for args in copy_commands:
+            try:
+                with open(target, "wb") as output:
+                    result = subprocess.run(args, stdout=output, stderr=subprocess.PIPE, check=True)
+                if os.path.getsize(target) > 0:
+                    print(f"[System] Screenshot saved as {target}")
+                    return target
+            except (OSError, subprocess.CalledProcessError) as exc:
+                print(f"[System] Screenshot copy attempt failed: {exc}")
+                try:
+                    if os.path.exists(target):
+                        os.remove(target)
+                except OSError:
+                    pass
+
+        print("[System] Screenshot copy failed")
+        return None
+
+    def check_connection(self):
+        result = self.run("id")
+        connected = bool(result and "uid=" in result)
+        print("[System] Android control ready." if connected else "[System] Android control unavailable.")
+        return connected
+
+
+ADBController = AndroidController

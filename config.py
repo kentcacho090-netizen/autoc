@@ -1,19 +1,10 @@
-"""AUTO runtime configuration."""
+"""Compatibility configuration for AutoC.
 
-# --- DEVICE / APP ---
-# Leave empty to auto-select the first connected ADB device.
-ADB_DEVICE = ""
+Runtime settings live in ``settings.json`` and ``detector_config.json``.
+The Android controller and vision layer discover the current screen instead
+of relying on fixed device coordinates.
+"""
+
+TIME_BETWEEN_CYCLES = 10
+TIME_TO_WAIT_FOR_BATTLE = 90
 TARGET_PACKAGE = "com.supercell.clashofclans"
-
-# Your game viewport is 1280x720 landscape.
-SCREEN_WIDTH = 1280
-SCREEN_HEIGHT = 720
-
-# --- DETECTOR ---
-DETECTOR_CONFIG = "detector_config.json"
-SCREENSHOT_FILE = "autoc_observation.png"
-OBSERVE_INTERVAL = 5.0
-
-# These are intentionally NOT used by the current main loop. Do not put
-# guessed coordinates here and expect the bot to act on them. Action
-# coordinates must come from a positively detected UI state first.

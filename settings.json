@@ -1,0 +1,34 @@
+{
+  "enabled": false,
+  "strategy": "balanced",
+  "target_app": "com.supercell.clashofclans",
+  "detector_config": "detector_config.json",
+  "home_village": {
+    "enabled": true,
+    "smart_upgrades": true,
+    "smart_walls": true,
+    "smart_heroes": true,
+    "smart_lab": true,
+    "smart_builders": true
+  },
+  "builder_base": {
+    "enabled": true,
+    "smart_upgrades": true,
+    "smart_walls": true,
+    "smart_lab": true
+  },
+  "farming": {
+    "enabled": true,
+    "max_opponent_skips": 10
+  },
+  "vision": {
+    "confidence_threshold": 0.70,
+    "target_confidence_threshold": 0.80,
+    "max_action_failures": 3,
+    "progress_interval_seconds": 60
+  },
+  "timing": {
+    "battle_timeout": 90,
+    "cycle_delay": 10
+  }
+}

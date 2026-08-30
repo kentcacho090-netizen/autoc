@@ -1,23 +1,26 @@
-"""Screen observation for AUTO.
-
-Only lightweight Pillow processing is used in Python. Tesseract is isolated in
-its own subprocess so a broken OCR binary cannot crash the controller process.
-"""
+"""Dynamic screenshot observation for AutoC."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 import json
 import os
 import re
-import shutil
-import subprocess
-import tempfile
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 try:
-    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-except ImportError:  # pragma: no cover - handled at runtime on Android
+    from PIL import Image
+except ImportError:
     Image = None
+
+try:
+    from resource_observer import DynamicResourceObserver
+except ImportError:
+    DynamicResourceObserver = None
+
+try:
+    from feature_unlocks import FeatureUnlockDetector
+except ImportError:
+    FeatureUnlockDetector = None
 
 
 @dataclass
@@ -26,14 +29,20 @@ class Observation:
     orientation: str = "unknown"
     screen_size: str = "unknown"
     game_viewport: str = "unknown"
-    resources: Dict[str, Optional[int]] = field(default_factory=lambda: {
-        "gold": None,
-        "elixir": None,
-        "dark_elixir": None,
-        "builder_gold": None,
-        "builder_elixir": None,
-        "gems": None,
-    })
+    town_hall: Optional[int] = None
+    town_hall_confidence: float = 0.0
+    builder_base_unlocked: bool = False
+    dark_elixir_unlocked: bool = False
+    resources: Dict[str, Optional[int]] = field(
+        default_factory=lambda: {
+            "gold": None,
+            "elixir": None,
+            "dark_elixir": None,
+            "builder_gold": None,
+            "builder_elixir": None,
+            "gems": None,
+        }
+    )
     text: str = ""
     confidence: float = 0.0
     source: str = "none"
@@ -45,28 +54,23 @@ class Observation:
 
 
 class ScreenDetector:
-    """Detect basic CoC HUD state from a screenshot.
-
-    Missing dark elixir/builder resources are normal at lower Town Halls and
-    are represented as None rather than causing home-village detection to fail.
-    """
+    """Observe CoC from fresh screenshots; absence never unlocks optional systems."""
 
     def __init__(self, controller, config_path="detector_config.json"):
         self.controller = controller
         self.config = self._load_config(config_path)
-        self.regions = self.config.get("regions", {})
         ocr = self.config.get("ocr", {})
-        self.scale = max(2, min(6, int(ocr.get("scale", 4))))
-        self.threshold = max(120, min(240, int(ocr.get("threshold", 170))))
-        self.ocr_timeout = max(1, min(10, int(ocr.get("timeout", 4))))
+        self.scale = max(2, int(ocr.get("scale", 3)))
+        self.threshold = int(ocr.get("threshold", 165))
+        self.resource_observer = DynamicResourceObserver() if DynamicResourceObserver else None
+        self.feature_detector = FeatureUnlockDetector() if FeatureUnlockDetector else None
 
     @staticmethod
     def _load_config(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                value = json.load(f)
-            return value if isinstance(value, dict) else {}
-        except (OSError, json.JSONDecodeError, TypeError):
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
             return {}
 
     def capture(self, filename="autoc_observation.png"):
@@ -76,128 +80,64 @@ class ScreenDetector:
     def parse_number(text):
         if not text:
             return None
-        raw = text.strip().upper().replace(" ", "")
-        # OCR occasionally adds a punctuation mark. Remove only separators;
-        # never silently accept arbitrary letters.
-        raw = raw.replace("|", "")
-        if not re.fullmatch(r"[0-9][0-9,\.]*[KMB]?", raw):
+        raw = str(text).strip().upper().replace("O", "0").replace("I", "1").replace("L", "1")
+        raw = re.sub(r"\s+", "", raw)
+        raw = re.sub(r"[^0-9KMB,\.\-]", "", raw)
+        if not raw or raw.startswith("-"):
             return None
         suffix = raw[-1:] if raw[-1:] in "KMB" else ""
         token = raw[:-1] if suffix else raw
+        if not token or not re.fullmatch(r"[0-9][0-9,\.]*", token):
+            return None
         try:
             if suffix:
-                token = token.replace(",", "")
-                value = float(token) * {"K": 10**3, "M": 10**6, "B": 10**9}[suffix]
-                return int(value) if value >= 0 else None
-            token = token.replace(",", "").replace(".", "")
-            return int(token)
+                compact = token.replace(",", ".")
+                if compact.count(".") > 1:
+                    parts = compact.split(".")
+                    compact = parts[0] + "." + "".join(parts[1:])
+                return int(round(float(compact) * {"K": 10**3, "M": 10**6, "B": 10**9}[suffix]))
+            return int(re.sub(r"[,.]", "", token))
         except (ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _normalize(text):
+        return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+    @staticmethod
+    def _town_hall_from_text(text):
+        normalized = ScreenDetector._normalize(text)
+        for pattern in (
+            r"town\s*hall\s*(?:level\s*)?(\d{1,2})",
+            r"townhall\s*(?:level\s*)?(\d{1,2})",
+            r"\bth\s*(?:level\s*)?(\d{1,2})\b",
+        ):
+            match = re.search(pattern, normalized)
+            if match:
+                level = int(match.group(1))
+                if 1 <= level <= 20:
+                    return level, 0.98
+        return None, 0.0
+
+    def _dynamic_resources(self, image_path):
+        if self.resource_observer is None:
+            return None
+        try:
+            return self.resource_observer.read(image_path)
+        except Exception:
+            return None
+
+    def _optional_features(self, text):
+        if self.feature_detector is None:
+            return None
+        try:
+            return self.feature_detector.detect(ocr_text=text)
+        except Exception:
             return None
 
     @staticmethod
     def _find_game_viewport(image):
         return image, (0, 0, image.width, image.height), "none"
-
-    @staticmethod
-    def _crop_norm(image, region):
-        x, y, w, h = [float(v) for v in region]
-        left = max(0, min(image.width - 1, int(x * image.width)))
-        top = max(0, min(image.height - 1, int(y * image.height)))
-        right = max(left + 1, min(image.width, int((x + w) * image.width)))
-        bottom = max(top + 1, min(image.height, int((y + h) * image.height)))
-        return image.crop((left, top, right, bottom))
-
-    def _white_text_mask(self, crop):
-        """Extract bright, low-saturation HUD text without OpenCV."""
-        rgb = crop.convert("RGB")
-        # Enhance contrast first; this is faster and more stable than a Python
-        # pixel-by-pixel loop on every screenshot.
-        gray = ImageOps.grayscale(rgb)
-        gray = ImageEnhance.Contrast(gray).enhance(1.8)
-        mask = gray.point(lambda p: 255 if p >= self.threshold else 0)
-        return mask.filter(ImageFilter.MaxFilter(3))
-
-    def _tesseract(self, image, psm):
-        if Image is None or not shutil.which("tesseract"):
-            return ""
-        temp = None
-        try:
-            fd, temp = tempfile.mkstemp(suffix=".png")
-            os.close(fd)
-            image.save(temp, format="PNG", optimize=False)
-            result = subprocess.run(
-                [
-                    "tesseract", temp, "stdout",
-                    "--psm", str(psm),
-                    "-c", "tessedit_char_whitelist=0123456789KMB",
-                    "-c", "user_defined_dpi=200",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=self.ocr_timeout,
-            )
-            # A negative return code means the child was terminated by a
-            # signal; report no OCR rather than taking down AUTO.
-            if result.returncode != 0:
-                return ""
-            return result.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            return ""
-        finally:
-            if temp:
-                try:
-                    os.unlink(temp)
-                except OSError:
-                    pass
-
-    def _resource_number(self, image, region) -> Tuple[Optional[int], str, float]:
-        crop = self._crop_norm(image, region)
-        mask = self._white_text_mask(crop)
-        bbox = mask.getbbox()
-        if not bbox:
-            return None, "", 0.0
-
-        bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        if bw < 8 or bh < 5:
-            return None, "", 0.0
-
-        pad_x = max(4, int(bw * 0.12))
-        pad_y = max(4, int(bh * 0.35))
-        x1 = max(0, bbox[0] - pad_x)
-        y1 = max(0, bbox[1] - pad_y)
-        x2 = min(mask.width, bbox[2] + pad_x)
-        y2 = min(mask.height, bbox[3] + pad_y)
-        digit_img = mask.crop((x1, y1, x2, y2)).resize(
-            ((x2 - x1) * self.scale, (y2 - y1) * self.scale)
-        )
-
-        outputs = []
-        for psm in (7, 13):
-            raw = self._tesseract(digit_img, psm)
-            value = self.parse_number(raw)
-            if value is not None and 0 <= value <= 2_000_000_000:
-                outputs.append((value, raw))
-
-        if not outputs:
-            return None, "", 0.0
-
-        # Prefer agreement between independent Tesseract layouts. If they
-        # disagree, use the first valid result but lower confidence sharply.
-        values = [v for v, _ in outputs]
-        if len(values) == 2 and values[0] != values[1]:
-            return values[0], outputs[0][1], 0.60
-
-        value, raw = outputs[0]
-        return value, raw, 0.95 if len(outputs) == 2 else 0.75
-
-    @staticmethod
-    def _default_hud_regions():
-        return {
-            "gold": [0.835, 0.015, 0.155, 0.075],
-            "elixir": [0.835, 0.095, 0.155, 0.075],
-            "dark_elixir": [0.835, 0.175, 0.155, 0.075],
-            "gems": [0.835, 0.245, 0.155, 0.075],
-        }
 
     def observe(self, image_path=None):
         path = image_path or self.capture()
@@ -205,55 +145,74 @@ class ScreenDetector:
             return Observation(source="screenshot_failed")
         if Image is None:
             return Observation(source="pillow_missing")
-        if not shutil.which("tesseract"):
-            return Observation(source="tesseract_missing")
-
         try:
             with Image.open(path) as original:
-                original.load()
                 original = original.convert("RGB")
                 width, height = original.size
                 game, bounds, rotation = self._find_game_viewport(original)
-
-                regions = self._default_hud_regions()
-                configured = self.regions if isinstance(self.regions, dict) else {}
-                for key in regions:
-                    candidate = configured.get(key)
-                    if isinstance(candidate, (list, tuple)) and len(candidate) == 4:
-                        regions[key] = list(candidate)
-
+                dynamic = self._dynamic_resources(path)
                 resources = {
-                    "gold": None, "elixir": None, "dark_elixir": None,
-                    "builder_gold": None, "builder_elixir": None, "gems": None,
+                    "gold": None,
+                    "elixir": None,
+                    "dark_elixir": None,
+                    "builder_gold": None,
+                    "builder_elixir": None,
+                    "gems": None,
                 }
-                raw_parts = []
-                confs = []
-                for key in ("gold", "elixir", "dark_elixir", "gems"):
-                    value, raw, conf = self._resource_number(game, regions[key])
-                    resources[key] = value
-                    if raw:
-                        raw_parts.append(f"{key}:{raw}")
-                        confs.append(conf)
+                text_parts = []
+                source = "ocr"
+                resource_confidence = []
+                regions_read = 0
+                if dynamic is not None:
+                    resources["gold"] = dynamic.values.get("gold")
+                    resources["elixir"] = dynamic.values.get("elixir")
+                    resources["dark_elixir"] = dynamic.values.get("dark_elixir")
+                    resources["gems"] = dynamic.values.get("gems")
+                    regions_read = sum(value is not None for value in resources.values())
+                    resource_confidence = [v for v in dynamic.confidence.values() if v > 0]
+                    text_parts.extend(
+                        f"{candidate.raw}@({candidate.x},{candidate.y})"
+                        for candidate in dynamic.candidates[:20]
+                    )
+                    source = dynamic.source
 
-                core_hits = sum(resources[k] is not None for k in ("gold", "elixir"))
-                village = "home" if core_hits == 2 else "unknown"
-                confidence = sum(confs) / len(confs) if confs else 0.0
-                diagnostics = (
-                    f"viewport={bounds[0]},{bounds[1]}-{bounds[2]},{bounds[3]}; "
-                    f"rotation={rotation}; resource_regions=calibrated-right; "
-                    f"raw=" + " || ".join(raw_parts)
-                )
+                text = " || ".join(text_parts)
+                town_hall, town_confidence = self._town_hall_from_text(text)
+                optional = self._optional_features(text)
+                dark_unlocked = bool(optional and optional.dark_elixir_unlocked)
+                builder_unlocked = bool(optional and optional.builder_base_unlocked)
+
+                if builder_unlocked:
+                    village = "builder_base"
+                elif resources["gold"] is not None and resources["elixir"] is not None:
+                    village = "home"
+                else:
+                    village = "unknown"
+
+                confidence_values = resource_confidence[:]
+                if town_confidence:
+                    confidence_values.append(town_confidence)
+                confidence = sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
                 return Observation(
                     village=village,
                     orientation="landscape" if width > height else "portrait",
                     screen_size=f"{width}x{height}",
                     game_viewport=f"{game.width}x{game.height}",
+                    town_hall=town_hall,
+                    town_hall_confidence=town_confidence,
+                    builder_base_unlocked=builder_unlocked,
+                    dark_elixir_unlocked=dark_unlocked,
                     resources=resources,
-                    text=" || ".join(raw_parts),
+                    text=text,
                     confidence=confidence,
-                    source="tesseract-white-mask",
-                    regions_read=len(raw_parts),
-                    diagnostics=diagnostics,
+                    source=source,
+                    regions_read=regions_read,
+                    diagnostics=(
+                        f"viewport={bounds[0]},{bounds[1]}-{bounds[2]},{bounds[3]}; "
+                        f"rotation={rotation}; dynamic_resource_candidates="
+                        f"{len(dynamic.candidates) if dynamic is not None else 0}; "
+                        f"optional_features=explicit-evidence"
+                    ),
                 )
-        except (OSError, ValueError, RuntimeError) as exc:
+        except (OSError, ValueError) as exc:
             return Observation(source="image_error", diagnostics=str(exc))

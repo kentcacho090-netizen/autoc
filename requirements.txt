@@ -1,1 +1,2 @@
-Pillow>=10.0,<13
+# AutoC uses the Termux tesseract package for OCR.
+# Python runtime is intentionally dependency-light for Android/Termux.
