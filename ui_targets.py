@@ -61,6 +61,13 @@ TARGET_ALIASES = {
     "builder_wall_upgrade": ("upgrade", "wall"),
 }
 
+TARGET_REQUIRE_ALL = {
+    "hero_upgrade": True,
+    "wall_upgrade": True,
+    "builder_lab": False,
+    "builder_wall_upgrade": True,
+}
+
 
 class UITargetDetector:
     def __init__(self, confidence_threshold: float = 0.55, accessibility=None):
@@ -121,12 +128,19 @@ class UITargetDetector:
     def _norm(text: str) -> str:
         return re.sub(r"[^a-z0-9 ]+", " ", text.lower()).strip()
 
-    @staticmethod
-    def _contains_variant(normalized: str, variant: str) -> bool:
-        normalized_variant = re.sub(r"[^a-z0-9 ]+", " ", variant.lower()).strip()
+    @classmethod
+    def _contains_variant(cls, normalized: str, variant: str) -> bool:
+        normalized_variant = cls._norm(variant)
         if not normalized_variant:
             return False
         return normalized_variant in normalized
+
+    @classmethod
+    def _matches_name(cls, normalized: str, name: str) -> bool:
+        variants = TARGET_ALIASES.get(name, (name,))
+        if TARGET_REQUIRE_ALL.get(name, False):
+            return all(cls._contains_variant(normalized, variant) for variant in variants)
+        return any(cls._contains_variant(normalized, variant) for variant in variants)
 
     @staticmethod
     def _vertical_overlap_ratio(first, second) -> float:
@@ -195,8 +209,7 @@ class UITargetDetector:
             searchable = node.searchable_text
             normalized = self._norm(searchable)
             for name in names:
-                variants = TARGET_ALIASES.get(name, (name,))
-                if any(self._contains_variant(normalized, variant) for variant in variants):
+                if self._matches_name(normalized, name):
                     left, top, right, bottom = node.bounds
                     targets.append(
                         UITarget(
@@ -222,11 +235,14 @@ class UITargetDetector:
         for text, x, y, width, height, confidence in candidates:
             normalized = self._norm(text)
             for name in names:
-                variants = TARGET_ALIASES.get(name, (name,))
-                matching = [variant for variant in variants if self._contains_variant(normalized, variant)]
-                if not matching:
+                if not self._matches_name(normalized, name):
                     continue
-                specificity = max(len(self._norm(variant)) for variant in matching)
+                matched_variants = [
+                    variant
+                    for variant in TARGET_ALIASES.get(name, (name,))
+                    if self._contains_variant(normalized, variant)
+                ]
+                specificity = max((len(self._norm(variant)) for variant in matched_variants), default=1)
                 adjusted_confidence = min(1.0, confidence + min(0.08, specificity / 200.0))
                 targets.append(
                     UITarget(
