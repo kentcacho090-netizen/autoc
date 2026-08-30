@@ -1,10 +1,11 @@
-"""Verified Android actions: observe immediately before and after every tap."""
+"""Verified Android actions: observe, gate, act, then verify semantic change."""
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
 from typing import Optional
 
+from action_verification import PostActionVerifier
 from ui_targets import UITarget, UITargetDetector
 
 
@@ -18,17 +19,13 @@ class ActionResult:
 
 
 class VerifiedActions:
-    def __init__(self, controller, target_detector=None):
+    def __init__(self, controller, target_detector=None, verifier=None):
         self.controller = controller
         self.targets = target_detector or UITargetDetector()
+        self.verifier = verifier or PostActionVerifier(self.targets.best)
 
     def tap_named(self, target_name: str, wait: float = 0.7) -> ActionResult:
-        """Tap only a target found in the fresh screenshot.
-
-        The Android command result must be non-null and a fresh post-action
-        screenshot must succeed before the action is reported as successful.
-        Arbitrary coordinates are never accepted by this class.
-        """
+        """Tap only a fresh target and require semantic post-action change."""
         before = self.controller.take_screenshot("autoc_action_before.png")
         if not before:
             return ActionResult(False, reason="Could not capture pre-action screen")
@@ -60,10 +57,20 @@ class VerifiedActions:
                 reason="Post-action screenshot failed",
             )
 
+        verification = self.verifier.verify(target, after)
+        if not verification.verified:
+            return ActionResult(
+                False,
+                target=target,
+                before=before,
+                after=after,
+                reason=verification.reason,
+            )
+
         return ActionResult(
             True,
             target=target,
             before=before,
             after=after,
-            reason="Target tapped and post-action screen captured",
+            reason=verification.reason,
         )
