@@ -2,9 +2,11 @@
 
 AutoC combines Android accessibility hierarchy data with screenshot OCR.
 Accessibility supplies semantic bounds when Android exposes them; OCR covers
-game-rendered text that is not present in the accessibility tree.  Neither
-channel is allowed to create an executable tap by itself: callers still pass
-the resulting target through the verified action gate.
+game-rendered text that is not present in the accessibility tree. OCR words
+are also grouped into nearby text runs so multi-word controls such as
+"Return Home" and "Town Hall" can be detected without fixed coordinates.
+Neither channel is allowed to create an executable tap by itself: callers
+still pass the resulting target through the verified action gate.
 """
 from __future__ import annotations
 
@@ -62,7 +64,7 @@ TARGET_ALIASES = {
 
 class UITargetDetector:
     def __init__(self, confidence_threshold: float = 0.55, accessibility=None):
-        self.confidence_threshold = confidence_threshold
+        self.confidence_threshold = float(confidence_threshold)
         if accessibility is not None:
             self.accessibility = accessibility
         elif AccessibilityInspector is not None:
@@ -126,6 +128,58 @@ class UITargetDetector:
             return False
         return normalized_variant in normalized
 
+    @staticmethod
+    def _vertical_overlap_ratio(first, second) -> float:
+        first_top = first[2]
+        first_bottom = first[2] + first[4]
+        second_top = second[2]
+        second_bottom = second[2] + second[4]
+        overlap = max(0, min(first_bottom, second_bottom) - max(first_top, second_top))
+        minimum_height = max(1, min(first[4], second[4]))
+        return overlap / minimum_height
+
+    @classmethod
+    def _can_join_words(cls, first, second) -> bool:
+        if cls._vertical_overlap_ratio(first, second) < 0.50:
+            return False
+        first_right = first[1] + first[3]
+        second_left = second[1]
+        gap = second_left - first_right
+        maximum_gap = max(20, int(min(first[4], second[4]) * 1.5))
+        return 0 <= gap <= maximum_gap
+
+    @classmethod
+    def _group_ocr_words(cls, words):
+        """Join adjacent OCR words on the same visual text line."""
+        if not words:
+            return []
+
+        ordered = sorted(words, key=lambda row: (row[2], row[1]))
+        groups = []
+        current = None
+        for word in ordered:
+            if current is None:
+                current = [word]
+                continue
+            if cls._can_join_words(current[-1], word):
+                current.append(word)
+            else:
+                groups.append(cls._merge_word_group(current))
+                current = [word]
+        if current:
+            groups.append(cls._merge_word_group(current))
+        return groups
+
+    @staticmethod
+    def _merge_word_group(group):
+        text = " ".join(word[0] for word in group)
+        left = min(word[1] for word in group)
+        top = min(word[2] for word in group)
+        right = max(word[1] + word[3] for word in group)
+        bottom = max(word[2] + word[4] for word in group)
+        confidence = min(word[5] for word in group)
+        return text, left, top, right - left, bottom - top, confidence
+
     def _accessibility_targets(self, names: tuple[str, ...]) -> list[UITarget]:
         if self.accessibility is None:
             return []
@@ -144,45 +198,54 @@ class UITargetDetector:
                 variants = TARGET_ALIASES.get(name, (name,))
                 if any(self._contains_variant(normalized, variant) for variant in variants):
                     left, top, right, bottom = node.bounds
-                    width = right - left
-                    height = bottom - top
-                    confidence = 0.97 if node.clickable else 0.90
                     targets.append(
                         UITarget(
                             name=name,
                             text=searchable,
                             x=(left + right) // 2,
                             y=(top + bottom) // 2,
-                            width=width,
-                            height=height,
-                            confidence=confidence,
+                            width=right - left,
+                            height=bottom - top,
+                            confidence=0.97 if node.clickable else 0.90,
                             source="accessibility",
                         )
                     )
                     break
         return targets
 
+    def _ocr_targets(self, image_path: str, names: tuple[str, ...]) -> list[UITarget]:
+        words = self._ocr_data(image_path)
+        candidates = list(words)
+        candidates.extend(grouped for grouped in self._group_ocr_words(words) if grouped not in candidates)
+
+        targets: list[UITarget] = []
+        for text, x, y, width, height, confidence in candidates:
+            normalized = self._norm(text)
+            for name in names:
+                variants = TARGET_ALIASES.get(name, (name,))
+                matching = [variant for variant in variants if self._contains_variant(normalized, variant)]
+                if not matching:
+                    continue
+                specificity = max(len(self._norm(variant)) for variant in matching)
+                adjusted_confidence = min(1.0, confidence + min(0.08, specificity / 200.0))
+                targets.append(
+                    UITarget(
+                        name=name,
+                        text=text,
+                        x=x + width // 2,
+                        y=y + height // 2,
+                        width=width,
+                        height=height,
+                        confidence=adjusted_confidence,
+                        source="ocr-grouped" if " " in text.strip() else "ocr",
+                    )
+                )
+        return targets
+
     def find(self, image_path: str, names: Optional[Iterable[str]] = None):
         wanted = tuple(names or TARGET_ALIASES.keys())
         targets = self._accessibility_targets(wanted)
-        words = self._ocr_data(image_path)
-        for text, x, y, width, height, confidence in words:
-            normalized = self._norm(text)
-            for name in wanted:
-                variants = TARGET_ALIASES.get(name, (name,))
-                if any(self._contains_variant(normalized, variant) for variant in variants):
-                    targets.append(
-                        UITarget(
-                            name=name,
-                            text=text,
-                            x=x + width // 2,
-                            y=y + height // 2,
-                            width=width,
-                            height=height,
-                            confidence=confidence,
-                            source="ocr",
-                        )
-                    )
+        targets.extend(self._ocr_targets(image_path, wanted))
         return self._deduplicate(targets)
 
     @staticmethod
