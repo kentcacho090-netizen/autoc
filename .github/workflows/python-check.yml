@@ -49,8 +49,9 @@ import ui_targets
 import verified_actions
 import diagnostics
 import diagnostic_report
+import feature_unlocks
 print('Application imports valid')
 PY
 
-      - name: Run deterministic core tests
-        run: python -m unittest -v test_core.py
+      - name: Run deterministic tests
+        run: python -m unittest discover -v
