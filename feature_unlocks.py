@@ -1,9 +1,8 @@
 """Evidence-driven detection of optional Clash of Clans features.
 
-The detector distinguishes "not observed" from "locked".  Optional systems
-such as Dark Elixir and Builder Base become eligible only after current-screen
-OCR/accessibility evidence establishes that the feature exists.  No absence
-of text is treated as proof of a lock or unlock.
+The detector distinguishes "not observed" from "locked". Optional systems
+become eligible only after current-screen evidence establishes that the
+feature exists. Absence is never treated as proof of a lock or unlock.
 """
 from __future__ import annotations
 
@@ -45,12 +44,14 @@ class FeatureUnlockDetector:
         "dark barracks",
         "dark drill",
     )
+    # Avoid generic home-village labels such as "Elixir Collector".
     _BUILDER_TERMS = (
         "builder base",
         "builder hall",
-        "clock tower",
-        "elixir collector",
+        "builder hut",
         "builder gold",
+        "builder elixir",
+        "clock tower",
     )
 
     @staticmethod
@@ -73,7 +74,6 @@ class FeatureUnlockDetector:
         )
         if not matched:
             return None
-        # Multiple independent feature terms are stronger than one generic label.
         confidence = min(0.99, 0.82 + 0.08 * (len(matched) - 1))
         return FeatureEvidence(
             feature=feature,
@@ -88,14 +88,14 @@ class FeatureUnlockDetector:
         ocr_text: str = "",
         accessibility_text: str = "",
     ) -> FeatureUnlockState:
-        ocr = self._evidence("dark_elixir", ocr_text, self._DARK_TERMS, "ocr")
+        dark_ocr = self._evidence("dark_elixir", ocr_text, self._DARK_TERMS, "ocr")
         builder_ocr = self._evidence("builder_base", ocr_text, self._BUILDER_TERMS, "ocr")
-        acc = self._evidence("dark_elixir", accessibility_text, self._DARK_TERMS, "accessibility")
+        dark_acc = self._evidence("dark_elixir", accessibility_text, self._DARK_TERMS, "accessibility")
         builder_acc = self._evidence("builder_base", accessibility_text, self._BUILDER_TERMS, "accessibility")
-
-        dark = self._prefer(ocr, acc)
-        builder = self._prefer(builder_ocr, builder_acc)
-        return FeatureUnlockState(dark_elixir=dark, builder_base=builder)
+        return FeatureUnlockState(
+            dark_elixir=self._prefer(dark_ocr, dark_acc),
+            builder_base=self._prefer(builder_ocr, builder_acc),
+        )
 
     @staticmethod
     def _prefer(
