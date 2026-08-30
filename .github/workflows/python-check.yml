@@ -47,6 +47,7 @@ import townhall
 import accessibility
 import ui_targets
 import verified_actions
+import action_verification
 import diagnostics
 import diagnostic_report
 import feature_unlocks
