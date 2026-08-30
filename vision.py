@@ -13,6 +13,11 @@ try:
 except ImportError:
     Image = None
 
+try:
+    from resource_observer import DynamicResourceObserver
+except ImportError:
+    DynamicResourceObserver = None
+
 
 @dataclass
 class Observation:
@@ -25,8 +30,12 @@ class Observation:
     builder_base_unlocked: bool = False
     resources: Dict[str, Optional[int]] = field(
         default_factory=lambda: {
-            "gold": None, "elixir": None, "dark_elixir": None,
-            "builder_gold": None, "builder_elixir": None, "gems": None,
+            "gold": None,
+            "elixir": None,
+            "dark_elixir": None,
+            "builder_gold": None,
+            "builder_elixir": None,
+            "gems": None,
         }
     )
     text: str = ""
@@ -40,7 +49,8 @@ class Observation:
 
 
 class ScreenDetector:
-    """Safe CoC OCR for Termux; avoids fixed pixel assumptions beyond HUD regions."""
+    """Observe the current CoC screen with screenshot OCR and dynamic resource geometry."""
+
     def __init__(self, controller, config_path="detector_config.json"):
         self.controller = controller
         self.config = self._load_config(config_path)
@@ -48,6 +58,7 @@ class ScreenDetector:
         ocr = self.config.get("ocr", {})
         self.scale = max(2, int(ocr.get("scale", 3)))
         self.threshold = int(ocr.get("threshold", 165))
+        self.resource_observer = DynamicResourceObserver() if DynamicResourceObserver is not None else None
 
     @staticmethod
     def _load_config(path):
@@ -84,104 +95,66 @@ class ScreenDetector:
         except (ValueError, OverflowError):
             return None
 
+    def _dynamic_resources(self, image_path):
+        if self.resource_observer is None:
+            return None
+        try:
+            return self.resource_observer.read(image_path)
+        except Exception:
+            return None
+
     @staticmethod
     def _find_game_viewport(image):
         return image, (0, 0, image.width, image.height), "none"
 
-    @staticmethod
-    def _crop_norm(image, region):
-        x, y, w, h = [float(v) for v in region]
-        left, top = max(0, int(x * image.width)), max(0, int(y * image.height))
-        right, bottom = min(image.width, int((x + w) * image.width)), min(image.height, int((y + h) * image.height))
-        if right <= left or bottom <= top:
-            return image.crop((0, 0, 1, 1))
-        return image.crop((left, top, right, bottom))
-
-    def _white_text_mask(self, crop):
-        rgb = crop.convert("RGB")
-        out = Image.new("L", rgb.size, 0)
-        src, dst = list(rgb.getdata()), [0] * (rgb.width * rgb.height)
-        for i, (r, g, b) in enumerate(src):
-            hi, lo = max(r, g, b), min(r, g, b)
-            if hi >= self.threshold and hi - lo <= 65 and r + g + b >= 520:
-                dst[i] = 255
-        out.putdata(dst)
-        return out
-
-    def _tesseract_candidates(self, image):
-        if Image is None or not shutil.which("tesseract"):
-            return []
-        temp = None
-        try:
-            fd, temp = tempfile.mkstemp(suffix=".png")
-            os.close(fd)
-            image.save(temp, format="PNG")
-            candidates = []
-            for psm in (7, 6, 13):
-                try:
-                    result = subprocess.run(["tesseract", temp, "stdout", "--psm", str(psm), "-c", "tessedit_char_whitelist=0123456789KMBkmb,.", "-c", "load_system_dawg=0", "-c", "load_freq_dawg=0"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=8, check=False)
-                except (OSError, subprocess.SubprocessError):
-                    continue
-                if result.returncode == 0 and result.stdout.strip():
-                    candidates.append(result.stdout.strip())
-            return candidates
-        finally:
-            if temp:
-                try: os.unlink(temp)
-                except OSError: pass
-
-    def _tesseract(self, image):
-        candidates = self._tesseract_candidates(image)
-        if not candidates: return ""
-        valid = [(self.parse_number(v), v) for v in candidates]
-        valid = [(n, v) for n, v in valid if n is not None]
-        if valid:
-            return max(valid, key=lambda item: (len(re.sub(r"[^0-9]", "", item[1])), len(item[1])))[1]
-        return max(candidates, key=len)
-
-    def _resource_number(self, image, region) -> Tuple[Optional[int], str, float]:
-        crop = self._crop_norm(image, region)
-        mask = self._white_text_mask(crop)
-        bbox = mask.getbbox()
-        if not bbox: return None, "", 0.0
-        bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        if bw < 10 or bh < 6: return None, "", 0.0
-        px, py = max(4, int(bw * 0.10)), max(4, int(bh * 0.35))
-        x1, y1 = max(0, bbox[0] - px), max(0, bbox[1] - py)
-        x2, y2 = min(mask.width, bbox[2] + px), min(mask.height, bbox[3] + py)
-        digit = mask.crop((x1, y1, x2, y2)).resize(((x2 - x1) * self.scale, (y2 - y1) * self.scale))
-        raw, value = self._tesseract(digit), None
-        value = self.parse_number(raw)
-        if value is not None and 0 <= value <= 2_000_000_000: return value, raw, 0.85
-        return None, raw, 0.0
-
-    @staticmethod
-    def _default_hud_regions():
-        return {"gold": [0.800, 0.015, 0.185, 0.075], "elixir": [0.800, 0.105, 0.185, 0.075], "dark_elixir": [0.800, 0.195, 0.185, 0.075], "gems": [0.800, 0.285, 0.185, 0.075]}
-
     def observe(self, image_path=None):
         path = image_path or self.capture()
-        if not path or not os.path.exists(path): return Observation(source="screenshot_failed")
-        if not shutil.which("tesseract"): return Observation(source="tesseract_missing")
-        if Image is None: return Observation(source="pillow_missing")
+        if not path or not os.path.exists(path):
+            return Observation(source="screenshot_failed")
+        if Image is None:
+            return Observation(source="pillow_missing")
         try:
             with Image.open(path) as original:
                 original = original.convert("RGB")
                 width, height = original.size
                 game, bounds, rotation = self._find_game_viewport(original)
-                regions = self._default_hud_regions()
-                configured = self.regions if isinstance(self.regions, dict) else {}
-                for key in regions:
-                    candidate = configured.get(key)
-                    if isinstance(candidate, (list, tuple)) and len(candidate) == 4: regions[key] = list(candidate)
-                resources = {k: None for k in ("gold", "elixir", "dark_elixir", "builder_gold", "builder_elixir", "gems")}
-                raw_parts, confs = [], []
-                for key in ("gold", "elixir", "dark_elixir", "gems"):
-                    value, raw, conf = self._resource_number(game, regions[key])
-                    resources[key] = value
-                    if raw: raw_parts.append(f"{key}:{raw}")
-                    if value is not None: confs.append(conf)
-                village = "home" if resources["gold"] is not None and resources["elixir"] is not None else "unknown"
-                return Observation(village=village, orientation="landscape" if width > height else "portrait", screen_size=f"{width}x{height}", game_viewport=f"{game.width}x{game.height}", resources=resources, text=" || ".join(raw_parts), confidence=sum(confs) / len(confs) if confs else 0.0, source="tesseract-white-mask-multipass", regions_read=len(raw_parts), diagnostics=f"viewport={bounds[0]},{bounds[1]}-{bounds[2]},{bounds[3]}; rotation={rotation}; resource_regions=wide-right; read={len(raw_parts)}/4; raw=" + " || ".join(raw_parts))
+                dynamic = self._dynamic_resources(path)
+                if dynamic is not None:
+                    resources = {
+                        "gold": dynamic.values.get("gold"),
+                        "elixir": dynamic.values.get("elixir"),
+                        "dark_elixir": dynamic.values.get("dark_elixir"),
+                        "builder_gold": None,
+                        "builder_elixir": None,
+                        "gems": dynamic.values.get("gems"),
+                    }
+                    readable = sum(value is not None for value in resources.values())
+                    confidence_values = [value for value in dynamic.confidence.values() if value > 0]
+                    confidence = sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
+                    village = "home" if resources["gold"] is not None and resources["elixir"] is not None else "unknown"
+                    raw_parts = [
+                        f"{candidate.raw}@({candidate.x},{candidate.y})"
+                        for candidate in dynamic.candidates[:12]
+                    ]
+                    return Observation(
+                        village=village,
+                        orientation="landscape" if width > height else "portrait",
+                        screen_size=f"{width}x{height}",
+                        game_viewport=f"{game.width}x{game.height}",
+                        resources=resources,
+                        text=" || ".join(raw_parts),
+                        confidence=confidence,
+                        source=dynamic.source,
+                        regions_read=readable,
+                        diagnostics=f"viewport={bounds[0]},{bounds[1]}-{bounds[2]},{bounds[3]}; rotation={rotation}; dynamic_resource_candidates={len(dynamic.candidates)}; readable={readable}/6",
+                    )
+                return Observation(
+                    village="unknown",
+                    orientation="landscape" if width > height else "portrait",
+                    screen_size=f"{width}x{height}",
+                    game_viewport=f"{game.width}x{game.height}",
+                    source="no-resource-observer",
+                    diagnostics="Dynamic resource observer unavailable",
+                )
         except Exception as exc:
             return Observation(source="image_error", diagnostics=str(exc))
